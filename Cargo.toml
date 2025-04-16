@@ -1,19 +1,56 @@
 [package]
-name = "tokio-splice"
-version = "0.2.2"
-authors = ["Hanaasagi <ambiguous404@gmail.com>"]
+name = "tokio-splice2"
+version = "0.3.0-alpha.1"
 edition = "2021"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/Hanaasagi/tokio-splice"
-description = """
-splice(2) in tokio
-"""
+rust-version = "1.70.0"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# === Publication info ===
+authors = ["Hantong Chen <cxwdyx620@gmail.com>", "Hanaasagi <ambiguous404@gmail.com>"]
+description = "splice(2) in tokio"
+keywords = ["tokio", "splice", "pipe", "async"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/hanyu-dev/tokio-splice2"
 
 [dependencies]
-libc = "0.2.169"
-tokio = { version = "1.43.0", features = ["net"] }
+rustix = { version = "1.0.0", features = ["pipe"] }
+tokio = { version = "1.39.0", features = ["fs", "net"] }
 
 [dev-dependencies]
-tokio = { version = "1.43.0", features = ["net", "macros", "rt", "signal", "io-util", "time"] }
+tokio = { version = "1.39.0", features = ["net", "macros", "rt", "signal", "io-util", "time"] }
+
+[lints]
+clippy.allow_attributes_without_reason = "warn"
+clippy.assertions_on_result_states = "warn"
+clippy.assigning_clones = "warn"
+clippy.bool_to_int_with_if = "warn"
+clippy.cognitive_complexity = "warn"
+clippy.create_dir = "warn"
+clippy.dbg_macro = "warn"
+clippy.debug_assert_with_mut_call = "warn"
+clippy.default_trait_access = "warn"
+clippy.disallowed_script_idents = "deny"
+clippy.doc_link_with_quotes = "warn"
+clippy.doc_markdown = "warn"
+clippy.else_if_without_else = "deny"
+clippy.enum_glob_use = "warn"
+clippy.filetype_is_file = "warn"
+clippy.inefficient_to_string = "warn"
+clippy.mem_forget = "warn"
+clippy.missing_panics_doc = "warn"
+clippy.mod_module_files = "deny"
+clippy.multiple_inherent_impl = "warn"
+clippy.mutex_atomic = "warn"
+clippy.mutex_integer = "warn"
+clippy.needless_continue = "warn"
+clippy.panic = "warn"
+clippy.significant_drop_in_scrutinee = "warn"
+clippy.todo = "warn"
+clippy.unimplemented = "warn"
+clippy.unreachable = "warn"
+clippy.wildcard_dependencies = "deny"
+clippy.wildcard_imports = "warn"
+rust.unsafe_code = "warn"
+rust.missing_docs = "warn"
+rust.missing_debug_implementations = "warn"
+rust.unreachable_pub = "warn"

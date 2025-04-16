@@ -1,8 +1,13 @@
+//! Test
+
 use std::io::Result;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::task;
-use tokio_splice::zero_copy_bidirectional;
+
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    task,
+};
+use tokio_splice2::copy_bidirectional;
 
 async fn echo_server(addr: &str) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -24,7 +29,7 @@ async fn echo_server(addr: &str) -> Result<()> {
 
 async fn forwarding(mut stream1: TcpStream, forward_addr: &str) -> Result<()> {
     let mut stream2 = TcpStream::connect(forward_addr).await?;
-    zero_copy_bidirectional(&mut stream1, &mut stream2).await?;
+    copy_bidirectional(&mut stream1, &mut stream2).await?;
     Ok(())
 }
 
