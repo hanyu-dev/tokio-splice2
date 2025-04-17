@@ -108,6 +108,26 @@ impl<R, W> SpliceIoCtx<R, W> {
             pipe,
         })
     }
+
+    /// Reuse the `SpliceIoCtx` instance.
+    pub fn reuse(&self) -> io::Result<Self> {
+        let pipe = Pipe::new()?;
+
+        Ok(Self {
+            need_flush: false,
+            read_done: false,
+            off_in: self.off_in,
+            off_out: self.off_out,
+            target_len: self.target_len,
+            last_read: 0,
+            has_read: 0,
+            last_write: 0,
+            has_written: 0,
+            r: PhantomData,
+            w: PhantomData,
+            pipe,
+        })
+    }
 }
 
 impl<W> SpliceIoCtx<File, W> {
