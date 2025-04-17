@@ -109,28 +109,6 @@ impl<R, W> SpliceIoCtx<R, W> {
         })
     }
 
-    /// Reuse the `SpliceIoCtx` instance.
-    pub fn reuse(&self) -> io::Result<Self> {
-        let pipe = Pipe::new()?;
-
-        Ok(Self {
-            need_flush: false,
-            read_done: false,
-            off_in: self.off_in,
-            off_out: self.off_out,
-            target_len: self.target_len,
-            last_read: 0,
-            has_read: 0,
-            last_write: 0,
-            has_written: 0,
-            r: PhantomData,
-            w: PhantomData,
-            pipe,
-        })
-    }
-}
-
-impl<W> SpliceIoCtx<File, W> {
     #[inline]
     /// Create a new `SpliceIoCtx` instance.
     ///
@@ -150,7 +128,10 @@ impl<W> SpliceIoCtx<File, W> {
         r: &File,
         f_offset_start: Option<u64>,
         f_offset_end: Option<u64>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<Self>
+    where
+        R: AsyncFileFd,
+    {
         let file_len = r.metadata().await?.len();
 
         let target_len = match (f_offset_start, f_offset_end) {
@@ -176,6 +157,26 @@ impl<W> SpliceIoCtx<File, W> {
         };
 
         Self::prepare(f_offset_start, None, Some(target_len))
+    }
+
+    /// Reuse the `SpliceIoCtx` instance.
+    pub fn reuse(&self) -> io::Result<Self> {
+        let pipe = Pipe::new()?;
+
+        Ok(Self {
+            need_flush: false,
+            read_done: false,
+            off_in: self.off_in,
+            off_out: self.off_out,
+            target_len: self.target_len,
+            last_read: 0,
+            has_read: 0,
+            last_write: 0,
+            has_written: 0,
+            r: PhantomData,
+            w: PhantomData,
+            pipe,
+        })
     }
 }
 
@@ -446,6 +447,15 @@ impl<T: AsyncWriteFd + Unpin> AsyncWriteFd for &mut T {
 /// Marker trait: indicate a duplex stream like [`TcpStream`] or [`UnixStream`].
 pub trait AsyncStreamFd: AsyncReadFd + AsyncWriteFd {}
 
+impl<T: AsyncStreamFd + Unpin> AsyncStreamFd for &mut T {}
+
+/// Marker trait: a file.
+/// 
+/// Currently only [`tokio::fs::File`] is supported.
+pub trait AsyncFileFd {}
+
+impl<T: AsyncFileFd> AsyncFileFd for &mut T {}
+
 macro_rules! impl_async_fd {
     (STREAM: $($ty:ty),+) => {
         $(
@@ -472,15 +482,15 @@ macro_rules! impl_async_fd {
             impl AsyncStreamFd for $ty {}
         )+
     };
-    (BLANKET: $($ty:ty),+) => {
+    (FILE: $($ty:ty),+) => {
         $(
 
             impl AsyncReadFd for $ty {}
             impl AsyncWriteFd for $ty {}
-
+            impl AsyncFileFd for $ty {}
         )+
     };
 }
 
 impl_async_fd!(STREAM: TcpStream, UnixStream);
-impl_async_fd!(BLANKET: File);
+impl_async_fd!(FILE: File);
