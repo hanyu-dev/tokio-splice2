@@ -247,7 +247,7 @@ where
     }
 
     /// Do zero-copy IO from `r` to `w` with `splice(2)`.
-    fn poll_copy(
+    pub fn poll_copy(
         &mut self,
         cx: &mut Context<'_>,
         mut r: Pin<&mut R>,
