@@ -114,7 +114,7 @@ impl<R, W> SpliceIoCtx<R, W> {
     ///
     /// ## Arguments
     ///
-    /// * `r` - [`tokio::fs::File`].
+    /// * `f_len` - File length.
     /// * `f_offset_start` - File offset start. Set to `None` to read from the
     ///   beginning.
     /// * `f_offset_end` - File offset end. Set to `None` to read to the end.
@@ -124,16 +124,14 @@ impl<R, W> SpliceIoCtx<R, W> {
     /// * Fail to create a pipe.
     /// * Fail to get file length.
     /// * Invalid offset.
-    pub async fn prepare_from_file(
-        r: &File,
+    pub fn prepare_from_file(
+        f_len: u64,
         f_offset_start: Option<u64>,
         f_offset_end: Option<u64>,
     ) -> io::Result<Self>
     where
         R: AsyncFileFd,
     {
-        let file_len = r.metadata().await?.len();
-
         let target_len = match (f_offset_start, f_offset_end) {
             (Some(f_offset_start), Some(f_offset_end)) if f_offset_start > f_offset_end => {
                 return Err(io::Error::new(
@@ -141,19 +139,19 @@ impl<R, W> SpliceIoCtx<R, W> {
                     "error: invalid offset: `offset_from` is larger than `offset_to`",
                 ))
             }
-            (Some(f_offset_start), _) if file_len < f_offset_start => {
+            (Some(f_offset_start), _) if f_len < f_offset_start => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "error: invalid offset: `offset_from` is out of bound of file length",
                 ))
             }
-            (_, Some(f_offset_end)) if file_len < f_offset_end => {
+            (_, Some(f_offset_end)) if f_len < f_offset_end => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "error: invalid offset: `offset_out` is out of bound of file length",
                 ))
             }
-            _ => f_offset_end.unwrap_or(file_len) - f_offset_start.unwrap_or(0),
+            _ => f_offset_end.unwrap_or(f_len) - f_offset_start.unwrap_or(0),
         };
 
         Self::prepare(f_offset_start, None, Some(target_len))
@@ -450,7 +448,7 @@ pub trait AsyncStreamFd: AsyncReadFd + AsyncWriteFd {}
 impl<T: AsyncStreamFd + Unpin> AsyncStreamFd for &mut T {}
 
 /// Marker trait: a file.
-/// 
+///
 /// Currently only [`tokio::fs::File`] is supported.
 pub trait AsyncFileFd {}
 
