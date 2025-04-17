@@ -14,7 +14,7 @@ use std::{
     io,
     marker::PhantomData,
     os::fd::AsFd,
-    pin::Pin,
+    pin::{pin, Pin},
     task::{ready, Context, Poll},
 };
 
@@ -27,30 +27,32 @@ use tokio::{
 
 use crate::pipe::Pipe;
 
-/// Zero-copy IO with `splice(2)`.
-pub struct SpliceIoCtx<R, W> {
-    need_flush: bool,
-    read_done: bool,
+pin_project_lite::pin_project! {
+    /// Zero-copy IO with `splice(2)`.
+    pub struct SpliceIoCtx<R, W> {
+        need_flush: bool,
+        read_done: bool,
 
-    // offset of fd_in (should be a file)
-    off_in: Option<u64>,
+        // offset of fd_in (should be a file)
+        off_in: Option<u64>,
 
-    // offset of fd_out (should be a file)
-    off_out: Option<u64>,
+        // offset of fd_out (should be a file)
+        off_out: Option<u64>,
 
-    // target len
-    target_len: Option<u64>,
+        // target len
+        target_len: Option<u64>,
 
-    last_read: usize,
-    has_read: usize,
+        last_read: usize,
+        has_read: usize,
 
-    last_write: usize,
-    has_written: usize,
+        last_write: usize,
+        has_written: usize,
 
-    r: PhantomData<R>,
-    w: PhantomData<W>,
+        r: PhantomData<R>,
+        w: PhantomData<W>,
 
-    pipe: Pipe,
+        pipe: Pipe,
+    }
 }
 
 impl<R, W> fmt::Debug for SpliceIoCtx<R, W> {
@@ -168,10 +170,18 @@ where
         R: AsyncReadFd + Unpin,
         W: AsyncWriteFd + Unpin,
     {
-        poll_fn(|cx| Poll::Ready(ready!(self.poll_copy(cx, r.as_mut(), w.as_mut())))).await
+        let mut this = pin!(self);
+
+        poll_fn(|cx| Poll::Ready(ready!(this.as_mut().poll_copy(cx, r.as_mut(), w.as_mut())))).await
     }
 
-    fn poll_fill_buf(&mut self, cx: &mut Context<'_>, r: Pin<&mut R>) -> Poll<io::Result<usize>> {
+    fn poll_fill_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        r: Pin<&mut R>,
+    ) -> Poll<io::Result<usize>> {
+        let this = self.project();
+
         loop {
             ready!(r.poll_read_ready(cx))?;
 
@@ -179,10 +189,10 @@ where
                 // ! overflow when target_len > u32::MAX on 32 bit system?
                 splice(
                     r.as_fd(),
-                    self.off_in.as_mut(),
-                    self.pipe.write_fd(),
+                    this.off_in.as_mut(),
+                    this.pipe.write_fd(),
                     None,
-                    self.target_len.unwrap_or(isize::MAX as u64) as usize - self.has_read,
+                    this.target_len.unwrap_or(isize::MAX as u64) as usize - *this.has_read,
                     SpliceFlags::NONBLOCK,
                 )
                 .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
@@ -196,22 +206,22 @@ where
             }
 
             if let Ok(&has_read) = has_read_result.as_ref() {
-                if self.last_read == has_read && has_read == 0 {
+                if *this.last_read == has_read && has_read == 0 {
                     // no more data to read, read 0
-                    self.read_done = true;
+                    *this.read_done = true;
                 }
 
-                self.last_read = has_read;
-                self.has_read += has_read;
+                *this.last_read = has_read;
+                *this.has_read += has_read;
 
                 // dbg!(format!(
                 //     "current -> 0x{:x}",
                 //     self.has_read
                 // ));
 
-                if self.has_read >= self.target_len.unwrap_or(isize::MAX as u64) as usize {
+                if *this.has_read >= this.target_len.unwrap_or(isize::MAX as u64) as usize {
                     // reached target length
-                    self.read_done = true;
+                    *this.read_done = true;
                 }
             }
 
@@ -219,17 +229,23 @@ where
         }
     }
 
-    fn poll_write_buf(&mut self, cx: &mut Context<'_>, w: Pin<&mut W>) -> Poll<io::Result<usize>> {
+    fn poll_write_buf(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        w: Pin<&mut W>,
+    ) -> Poll<io::Result<usize>> {
+        let this = self.project();
+
         loop {
             ready!(w.poll_write_ready(cx)?);
 
             let has_written_result = w.try_io_write(|| {
                 splice(
-                    self.pipe.read_fd(),
+                    this.pipe.read_fd(),
                     None,
                     w.as_fd(),
-                    self.off_out.as_mut(),
-                    self.has_read - self.has_written,
+                    this.off_out.as_mut(),
+                    *this.has_read - *this.has_written,
                     SpliceFlags::NONBLOCK,
                 )
                 .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
@@ -248,14 +264,14 @@ where
 
     /// Do zero-copy IO from `r` to `w` with `splice(2)`.
     pub fn poll_copy(
-        &mut self,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         mut r: Pin<&mut R>,
         mut w: Pin<&mut W>,
     ) -> Poll<io::Result<usize>> {
         loop {
             if !self.read_done && self.has_written == self.has_read {
-                match self.poll_fill_buf(cx, r.as_mut())? {
+                match self.as_mut().poll_fill_buf(cx, r.as_mut())? {
                     Poll::Ready(_) => {}
                     Poll::Pending => {
                         // Try flushing when the reader has no progress to avoid deadlock
@@ -273,7 +289,7 @@ where
 
             // need write data from pipe to writer
             while self.has_written < self.has_read {
-                let has_written = ready!(self.poll_write_buf(cx, w.as_mut()))?;
+                let has_written = ready!(self.as_mut().poll_write_buf(cx, w.as_mut()))?;
 
                 if has_written == 0 {
                     return Poll::Ready(Err(io::Error::new(
@@ -318,14 +334,14 @@ where
         mut a: Pin<&mut R>,
         mut b: Pin<&mut W>,
     ) -> io::Result<(usize, usize)> {
-        let mut io_a_to_b = self;
-        let mut io_b_to_a = io_a_to_b.prepare_opposite_direction_ctx()?;
+        let mut io_a_to_b = pin!(self);
+        let mut io_b_to_a = pin!(io_a_to_b.prepare_opposite_direction_ctx()?);
 
         poll_fn(|cx| {
             // Do not `ready!(io_a_to_b.poll_copy(cx, a.as_mut(), b.as_mut())?)`, or
             // `b_to_a` will never be polled.
-            let a_to_b = io_a_to_b.poll_copy(cx, a.as_mut(), b.as_mut())?;
-            let b_to_a = io_b_to_a.poll_copy(cx, b.as_mut(), a.as_mut())?;
+            let a_to_b = io_a_to_b.as_mut().poll_copy(cx, a.as_mut(), b.as_mut())?;
+            let b_to_a = io_b_to_a.as_mut().poll_copy(cx, b.as_mut(), a.as_mut())?;
 
             let a_to_b = ready!(a_to_b);
             let b_to_a = ready!(b_to_a);

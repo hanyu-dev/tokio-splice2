@@ -1,6 +1,6 @@
 [package]
 name = "tokio-splice2"
-version = "0.3.0-alpha.4"
+version = "0.3.0-alpha.5"
 edition = "2021"
 rust-version = "1.70.0"
 
@@ -13,6 +13,7 @@ readme = "README.md"
 repository = "https://github.com/hanyu-dev/tokio-splice2"
 
 [dependencies]
+pin-project-lite = "0.2.16"
 rustix = { version = "1.0.0", features = ["pipe"] }
 tokio = { version = "1.39.0", features = ["fs", "net"] }
 
