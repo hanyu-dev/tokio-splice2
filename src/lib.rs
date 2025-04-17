@@ -5,7 +5,7 @@ mod splice;
 
 use std::{io, pin::Pin};
 
-pub use splice::SpliceIoCtx;
+pub use splice::{AsyncReadFd, AsyncStreamFd, AsyncWriteFd, SpliceIoCtx};
 
 /// Copy data from `r` to `w` using `splice(2)`.
 ///

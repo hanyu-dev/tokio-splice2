@@ -363,10 +363,12 @@ where
 
 /// Marker trait: indicates a async-readable file descriptor.
 pub trait AsyncReadFd: AsyncRead + AsFd {
+    #[doc(hidden)]
     fn poll_read_ready(&self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 
+    #[doc(hidden)]
     fn try_io_read<R>(&self, f: impl FnOnce() -> io::Result<R>) -> io::Result<R> {
         f()
     }
@@ -384,10 +386,12 @@ impl<T: AsyncReadFd + Unpin> AsyncReadFd for &mut T {
 
 /// Marker trait: indicate a async-writable file descriptor.
 pub trait AsyncWriteFd: AsyncWrite + AsFd {
+    #[doc(hidden)]
     fn poll_write_ready(&self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 
+    #[doc(hidden)]
     fn try_io_write<R>(&self, f: impl FnOnce() -> io::Result<R>) -> io::Result<R> {
         f()
     }
