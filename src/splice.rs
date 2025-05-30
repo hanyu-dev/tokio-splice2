@@ -184,7 +184,7 @@ where
     W: AsyncWriteFd,
 {
     /// Copy data from `r` to `w` using `splice(2)`.
-    pub async fn copy(mut self, mut r: Pin<&mut R>, mut w: Pin<&mut W>) -> io::Result<usize>
+    pub async fn copy(self, mut r: Pin<&mut R>, mut w: Pin<&mut W>) -> io::Result<usize>
     where
         R: AsyncReadFd + Unpin,
         W: AsyncWriteFd + Unpin,
