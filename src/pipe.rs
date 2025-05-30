@@ -35,13 +35,13 @@ impl Pipe {
             .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
     }
 
-    #[inline]
+    #[inline(always)]
     /// Get the read file descriptor.
     pub(crate) const fn read_fd(&self) -> &OwnedFd {
         &self.read_fd
     }
 
-    #[inline]
+    #[inline(always)]
     /// Get the write file descriptor.
     pub(crate) const fn write_fd(&self) -> &OwnedFd {
         &self.write_fd

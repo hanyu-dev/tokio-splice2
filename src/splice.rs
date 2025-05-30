@@ -184,6 +184,9 @@ where
     W: AsyncWriteFd,
 {
     /// Copy data from `r` to `w` using `splice(2)`.
+    ///
+    /// After the future resolves, the bytes transferred from `r` to `w` will be
+    /// returned.
     pub async fn copy(self, mut r: Pin<&mut R>, mut w: Pin<&mut W>) -> io::Result<usize>
     where
         R: AsyncReadFd + Unpin,
@@ -194,6 +197,10 @@ where
         poll_fn(|cx| Poll::Ready(ready!(this.as_mut().poll_copy(cx, r.as_mut(), w.as_mut())))).await
     }
 
+    #[cfg_attr(
+        feature = "feat-tracing",
+        tracing::instrument(level = "TRACE", skip(cx, r))
+    )]
     fn poll_fill_buf(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -221,6 +228,9 @@ where
                 .as_ref()
                 .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
             {
+                #[cfg(feature = "feat-tracing")]
+                tracing::trace!("Would block, continue");
+
                 continue;
             }
 
@@ -248,6 +258,10 @@ where
         }
     }
 
+    #[cfg_attr(
+        feature = "feat-tracing",
+        tracing::instrument(level = "TRACE", skip(cx, w))
+    )]
     fn poll_write_buf(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -274,6 +288,9 @@ where
                 .as_ref()
                 .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
             {
+                #[cfg(feature = "feat-tracing")]
+                tracing::trace!("Would block, continue");
+
                 continue;
             }
 
@@ -281,6 +298,10 @@ where
         }
     }
 
+    #[cfg_attr(
+        feature = "feat-tracing",
+        tracing::instrument(level = "TRACE", skip(cx, r, w))
+    )]
     /// Do zero-copy IO from `r` to `w` with `splice(2)`.
     pub fn poll_copy(
         mut self: Pin<&mut Self>,
@@ -289,14 +310,23 @@ where
         mut w: Pin<&mut W>,
     ) -> Poll<io::Result<usize>> {
         loop {
+            #[cfg(feature = "feat-tracing")]
+            tracing::trace!("poll_copy enter loop");
+
             if !self.read_done && self.has_written == self.has_read {
                 match self.as_mut().poll_fill_buf(cx, r.as_mut())? {
-                    Poll::Ready(_) => {}
+                    Poll::Ready(_) => {
+                        #[cfg(feature = "feat-tracing")]
+                        tracing::trace!("poll_fill_buf finished");
+                    }
                     Poll::Pending => {
                         // Try flushing when the reader has no progress to avoid deadlock
                         // when the reader depends on buffered writer.
                         if self.need_flush {
                             ready!(w.poll_flush(cx))?;
+
+                            #[cfg(feature = "feat-tracing")]
+                            tracing::trace!("poll_flush finished");
 
                             self.need_flush = false;
                         }
@@ -308,6 +338,9 @@ where
 
             // need write data from pipe to writer
             while self.has_written < self.has_read {
+                #[cfg(feature = "feat-tracing")]
+                tracing::trace!("enter poll_write_buf loop");
+
                 let has_written = ready!(self.as_mut().poll_write_buf(cx, w.as_mut()))?;
 
                 if has_written == 0 {
@@ -348,6 +381,9 @@ where
     /// This function returns a future that will read from both streams,
     /// writing any data read to the opposing stream. This happens in both
     /// directions concurrently.
+    ///
+    /// After the future resolves, the bytes transferred from `a` to `b` and
+    /// from `b` to `a` will be returned as a tuple `(a_to_b, b_to_a)`.
     pub async fn copy_bidirectional(
         self,
         mut a: Pin<&mut R>,
@@ -359,6 +395,7 @@ where
         poll_fn(|cx| {
             // Do not `ready!(io_a_to_b.poll_copy(cx, a.as_mut(), b.as_mut())?)`, or
             // `b_to_a` will never be polled.
+
             let a_to_b = io_a_to_b.as_mut().poll_copy(cx, a.as_mut(), b.as_mut())?;
             let b_to_a = io_b_to_a.as_mut().poll_copy(cx, b.as_mut(), a.as_mut())?;
 

@@ -1,6 +1,6 @@
 [package]
 name = "tokio-splice2"
-version = "0.3.0-alpha.8"
+version = "0.3.0-alpha.9"
 edition = "2021"
 rust-version = "1.70.0"
 
@@ -16,9 +16,13 @@ repository = "https://github.com/hanyu-dev/tokio-splice2"
 pin-project-lite = "0.2.16"
 rustix = { version = "1.0.0", features = ["pipe"] }
 tokio = { version = "1.39.0", features = ["fs", "net"] }
+tracing = { version = "0.1.41", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.39.0", features = ["net", "macros", "rt", "signal", "io-util", "time"] }
+
+[features]
+feat-tracing = ["dep:tracing"]
 
 [lints]
 clippy.allow_attributes_without_reason = "warn"
