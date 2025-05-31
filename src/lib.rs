@@ -1,5 +1,7 @@
 //! tokio-splice2
 
+#![cfg_attr(feature = "feat-nightly", feature(cold_path))]
+
 mod pipe;
 mod splice;
 

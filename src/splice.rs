@@ -9,7 +9,7 @@
 //! [Linux]: https://man7.org/linux/man-pages/man2/splice.2.html
 
 use std::{
-    fmt,
+    cmp, fmt,
     future::poll_fn,
     io,
     marker::PhantomData,
@@ -310,62 +310,76 @@ where
         mut w: Pin<&mut W>,
     ) -> Poll<io::Result<usize>> {
         loop {
-            #[cfg(feature = "feat-tracing")]
-            tracing::trace!("poll_copy enter loop");
+            if self.need_flush {
+                #[cfg(feature = "feat-tracing")]
+                tracing::trace!("start `poll_flush`");
+
+                // Try flushing when the reader has no progress to avoid deadlock
+                // when the reader depends on buffered writer.
+
+                ready!(w.as_mut().poll_flush(cx))?;
+
+                #[cfg(feature = "feat-tracing")]
+                tracing::trace!("poll_flush finished");
+
+                self.need_flush = false;
+            }
 
             if !self.read_done && self.has_written == self.has_read {
-                match self.as_mut().poll_fill_buf(cx, r.as_mut())? {
-                    Poll::Ready(_) => {
-                        #[cfg(feature = "feat-tracing")]
-                        tracing::trace!("poll_fill_buf finished");
-                    }
-                    Poll::Pending => {
-                        // Try flushing when the reader has no progress to avoid deadlock
-                        // when the reader depends on buffered writer.
-                        if self.need_flush {
-                            ready!(w.poll_flush(cx))?;
-
-                            #[cfg(feature = "feat-tracing")]
-                            tracing::trace!("poll_flush finished");
-
-                            self.need_flush = false;
-                        }
-
-                        return Poll::Pending;
-                    }
-                };
-            }
-
-            // need write data from pipe to writer
-            while self.has_written < self.has_read {
                 #[cfg(feature = "feat-tracing")]
-                tracing::trace!("enter poll_write_buf loop");
+                tracing::trace!("start `poll_fill_buf`");
 
-                let has_written = ready!(self.as_mut().poll_write_buf(cx, w.as_mut()))?;
+                // Fill the buffer to be written.
+                let _op_has_read = ready!(self.as_mut().poll_fill_buf(cx, r.as_mut()))?;
 
-                if has_written == 0 {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "write zero byte into writer",
-                    )));
-                } else {
-                    self.last_write = has_written;
-                    self.has_written += has_written;
-                    self.need_flush = true;
-                }
+                #[cfg(feature = "feat-tracing")]
+                tracing::trace!(op_has_read = _op_has_read, "poll_fill_buf finished");
             }
 
-            // If pos larger than cap, this loop will never stop.
-            // In particular, user's wrong poll_write implementation returning
-            // incorrect written length may lead to thread blocking.
-            debug_assert!(
-                self.has_written <= self.has_read,
-                "writer returned length larger than input slice"
-            );
+            'poll_write_buf: loop {
+                #[cfg(feature = "feat-tracing")]
+                tracing::trace!("`poll_write_buf` looping");
 
-            if self.has_read == self.has_written && self.read_done {
-                ready!(w.as_mut().poll_flush(cx))?;
-                return Poll::Ready(Ok(self.has_written));
+                // If has_written is larger than has_read, this loop will never stop.
+                // In particular, user's wrong poll_write implementation returning
+                // incorrect written length may lead to thread blocking.
+                match self.has_written.cmp(&self.has_read) {
+                    cmp::Ordering::Less => {
+                        // continue to write
+                        let has_written = ready!(self.as_mut().poll_write_buf(cx, w.as_mut()))?;
+
+                        if has_written == 0 {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::WriteZero,
+                                "write zero byte into writer",
+                            )));
+                        } else {
+                            self.last_write = has_written;
+                            self.has_written += has_written;
+                            self.need_flush = true;
+                        }
+                    }
+                    cmp::Ordering::Equal if self.read_done => {
+                        ready!(w.as_mut().poll_flush(cx))?;
+                        return Poll::Ready(Ok(self.has_written));
+                    }
+                    cmp::Ordering::Equal => {
+                        // Writer has no more data to write, but reader has not finished reading.
+                        break 'poll_write_buf;
+                    }
+                    cmp::Ordering::Greater => {
+                        #[cfg(feature = "feat-nightly")]
+                        std::hint::cold_path();
+
+                        #[cfg(debug_assertions)]
+                        unreachable!("fatal error: writer returned length larger than input slice");
+
+                        #[cfg(not(debug_assertions))]
+                        return Poll::Ready(Err(io::Error::other(
+                            "fatal error: writer returned length larger than input slice",
+                        )));
+                    }
+                }
             }
         }
     }

@@ -22,7 +22,11 @@ tracing = { version = "0.1.41", optional = true }
 tokio = { version = "1.39.0", features = ["net", "macros", "rt", "signal", "io-util", "time"] }
 
 [features]
+# Enable tracing support
 feat-tracing = ["dep:tracing"]
+
+# Enable nightly Rust feature
+feat-nightly = []
 
 [lints]
 clippy.allow_attributes_without_reason = "warn"
