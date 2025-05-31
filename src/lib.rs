@@ -5,7 +5,8 @@
 mod pipe;
 mod splice;
 
-use std::{io, pin::Pin};
+use std::io;
+use std::pin::Pin;
 
 pub use splice::{AsyncReadFd, AsyncStreamFd, AsyncWriteFd, SpliceIoCtx};
 

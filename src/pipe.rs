@@ -2,10 +2,8 @@
 
 use std::io;
 
-use rustix::{
-    fd::OwnedFd,
-    pipe::{fcntl_setpipe_size, pipe_with, PipeFlags},
-};
+use rustix::fd::OwnedFd;
+use rustix::pipe::{fcntl_setpipe_size, pipe_with, PipeFlags};
 
 /// the size of `PIPE_BUF`
 const PIPE_SIZE: usize = 65536;
