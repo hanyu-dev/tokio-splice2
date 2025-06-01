@@ -8,22 +8,17 @@
 //!
 //! [Linux]: https://man7.org/linux/man-pages/man2/splice.2.html
 
-use std::{
-    cmp, fmt,
-    future::poll_fn,
-    io,
-    marker::PhantomData,
-    os::fd::AsFd,
-    pin::{pin, Pin},
-    task::{ready, Context, Poll},
-};
+use std::future::poll_fn;
+use std::marker::PhantomData;
+use std::os::fd::AsFd;
+use std::pin::{pin, Pin};
+use std::task::{ready, Context, Poll};
+use std::{cmp, fmt, io};
 
 use rustix::pipe::{splice, SpliceFlags};
-use tokio::{
-    fs::File,
-    io::{AsyncRead, AsyncWrite, Interest},
-    net::{TcpStream, UnixStream},
-};
+use tokio::fs::File;
+use tokio::io::{AsyncRead, AsyncWrite, Interest};
+use tokio::net::{TcpStream, UnixStream};
 
 use crate::pipe::Pipe;
 

@@ -2,11 +2,9 @@
 
 use std::io::Result;
 
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    task,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task;
 use tokio_splice2::copy_bidirectional;
 
 async fn echo_server(addr: &str) -> Result<()> {
