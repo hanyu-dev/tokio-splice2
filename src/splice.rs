@@ -1,22 +1,15 @@
 //! `splice(2)` IO implementation.
-//!
-//! See [`splice`](rustix::pipe::splice) for more details.
-//!
-//! # References
-//!
-//!  - [Linux]
-//!
-//! [Linux]: https://man7.org/linux/man-pages/man2/splice.2.html
 
 use std::fs::File;
 use std::future::poll_fn;
 use std::marker::PhantomData;
 use std::net::TcpStream;
+use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
-use std::pin::{pin, Pin};
+use std::pin::Pin;
 use std::task::{ready, Context, Poll};
-use std::{cmp, fmt, io};
+use std::{fmt, io};
 
 use rustix::pipe::{splice, SpliceFlags};
 use tokio::fs::File as AsyncFile;
@@ -24,94 +17,149 @@ use tokio::io::{AsyncRead, AsyncWrite, Interest};
 use tokio::net::{TcpStream as AsyncTcpStream, UnixStream as AsyncUnixStream};
 
 use crate::pipe::Pipe;
+use crate::traffic::TrafficResult;
 
-pin_project_lite::pin_project! {
-    /// Zero-copy IO with `splice(2)`.
-    pub struct SpliceIoCtx<R, W> {
-        need_flush: bool,
-        read_done: bool,
+#[derive(Debug)]
+pub(crate) enum Offset {
+    None,
+    /// Read offset set.
+    In(Option<u64>),
+    /// Write offset set.
+    Out(Option<u64>),
+}
 
-        // offset of fd_in (should be a file)
-        off_in: Option<u64>,
-
-        // offset of fd_out (should be a file)
-        off_out: Option<u64>,
-
-        // target len
-        target_len: Option<u64>,
-
-        last_read: usize,
-        has_read: usize,
-
-        last_write: usize,
-        has_written: usize,
-
-        r: PhantomData<R>,
-        w: PhantomData<W>,
-
-        pipe: Pipe,
+impl Offset {
+    #[inline]
+    fn off_in(&mut self) -> Option<&mut u64> {
+        match self {
+            Offset::In(off) => off.as_mut(),
+            _ => None,
+        }
     }
+
+    #[inline]
+    fn off_out(&mut self) -> Option<&mut u64> {
+        match self {
+            Offset::Out(off) => off.as_mut(),
+            _ => None,
+        }
+    }
+
+    fn calc_size_to_splice(
+        f_len: u64,
+        f_offset_start: Option<u64>,
+        f_offset_end: Option<u64>,
+    ) -> io::Result<u64> {
+        match (f_offset_start, f_offset_end) {
+            (Some(start), Some(end)) => {
+                if start > end || end > f_len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid offset range",
+                    ));
+                }
+                Ok(end - start)
+            }
+            (Some(start), None) => {
+                if start > f_len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid offset start",
+                    ));
+                }
+                Ok(f_len - start)
+            }
+            (None, Some(end)) => {
+                if end > f_len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid offset end",
+                    ));
+                }
+                Ok(end)
+            }
+            (None, None) => Ok(f_len),
+        }
+    }
+}
+
+const BLOCKING_SPLICE: bool = true;
+const NONBLOCKING_SPLICE: bool = false;
+
+/// Zero-copy IO with `splice(2)`.
+///
+/// Notice: see the [module-level documentation](crate) for known limitations.
+pub struct SpliceIoCtx<R, W> {
+    /// The `off_in` when splicing from `R` to the pipe, or the `off_out` when
+    /// splicing from the pipe to `W`.
+    offset: Offset,
+    /// Target length to read from `R` then write to `W`.
+    ///
+    /// Default is `isize::MAX`, which means read as much as possible.
+    size_to_splice: usize,
+
+    /// Pipe used to splice data.
+    pipe: Pipe,
+    /// Bytes that have been read from `R` into pipe write side.
+    has_read: usize,
+    /// Bytes that have been written to `W` from pipe read side.
+    has_written: usize,
+
+    /// Whether need to flush `W` after writing.
+    need_flush: bool,
+
+    r: PhantomData<R>,
+    w: PhantomData<W>,
 }
 
 impl<R, W> fmt::Debug for SpliceIoCtx<R, W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SpliceIoCtx")
-            .field("need_flush", &self.need_flush)
-            .field("read_done", &self.read_done)
-            .field("off_in", &self.off_in)
-            .field("off_out", &self.off_out)
-            .field("target_len", &self.target_len)
-            .field("last_read", &self.last_read)
+            .field("offset", &self.offset)
+            .field("size_to_splice", &self.size_to_splice)
+            .field("pipe", &self.pipe)
             .field("has_read", &self.has_read)
-            .field("last_write", &self.last_write)
             .field("has_written", &self.has_written)
+            .field("need_flush", &self.need_flush)
             .finish()
     }
 }
 
 impl<R, W> SpliceIoCtx<R, W> {
     #[inline]
-    /// Prepare a new `SpliceIoCtx` instance.
-    ///
-    /// ## Arguments
-    ///
-    /// * `off_in` - Read offset against `R` (only when `R` is a file that makes
-    ///   sense).
-    /// * `off_out` - Write offset against `W` (only when `W` is a file that
-    ///   makes sense).
-    /// * `target_len` - Len of bytes to transfer from `R` to `W`.
-    ///
-    /// ## Errors
-    ///
-    /// * Fail to create a pipe. See [`Pipe::new()`].
-    pub fn prepare(
-        off_in: Option<u64>,
-        off_out: Option<u64>,
-        target_len: Option<u64>,
-    ) -> io::Result<Self> {
-        let pipe = Pipe::new()?;
-
+    fn _prepare() -> io::Result<Self> {
         Ok(Self {
-            need_flush: false,
-            read_done: false,
-            off_in,
-            off_out,
-            target_len,
-            last_read: 0,
+            offset: Offset::None,
+            size_to_splice: isize::MAX as usize,
+            pipe: Pipe::new()?,
             has_read: 0,
-            last_write: 0,
             has_written: 0,
+            need_flush: false,
             r: PhantomData,
             w: PhantomData,
-            pipe,
         })
     }
 
     #[inline]
-    /// Create a new `SpliceIoCtx` instance with given offset.
+    /// Prepare a new `SpliceIoCtx` instance.
     ///
-    /// Should be used only when `R` is a file (`R`, `W` should not be a file at
-    /// the same time, but we don't check so).
+    /// Can be used only when `R` and `W` are not files.
+    ///
+    /// ## Errors
+    ///
+    /// * Create pipe failed.
+    pub fn prepare() -> io::Result<Self>
+    where
+        R: IsNotFile,
+        W: IsNotFile,
+    {
+        Self::_prepare()
+    }
+
+    #[inline]
+    /// Prepare a new `SpliceIoCtx` instance.
+    ///
+    /// Can be used only when `R` is a file.
     ///
     /// ## Arguments
     ///
@@ -122,27 +170,30 @@ impl<R, W> SpliceIoCtx<R, W> {
     ///
     /// ## Errors
     ///
-    /// * Fail to create a pipe.
-    /// * Fail to get file length.
     /// * Invalid offset.
-    pub fn init_to_read_file(
+    /// * Create pipe failed.
+    pub fn prepare_reading_file(
         f_len: u64,
         f_offset_start: Option<u64>,
         f_offset_end: Option<u64>,
     ) -> io::Result<Self>
     where
         R: IsFile,
+        W: IsNotFile,
     {
-        let target_len = Self::cal_file_offset(f_len, f_offset_start, f_offset_end)?;
-
-        Self::prepare(f_offset_start, None, Some(target_len))
+        Ok(SpliceIoCtx {
+            offset: Offset::In(Some(f_offset_start.unwrap_or(0))),
+            size_to_splice: Offset::calc_size_to_splice(f_len, f_offset_start, f_offset_end)?
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "file size too large"))?,
+            ..Self::_prepare()?
+        })
     }
 
     #[inline]
-    /// Create a new `SpliceIoCtx` instance with given offset.
+    /// Prepare a new `SpliceIoCtx` instance.
     ///
-    /// Should be used only when `W` is a file (`R`, `W` should not be a file at
-    /// the same time, but we don't check so).
+    /// Can be used only when `W` is a file.
     ///
     /// ## Arguments
     ///
@@ -153,42 +204,249 @@ impl<R, W> SpliceIoCtx<R, W> {
     ///
     /// ## Errors
     ///
-    /// * Fail to create a pipe.
-    /// * Fail to get file length.
     /// * Invalid offset.
-    pub fn init_to_write_file(
+    /// * Create pipe failed.
+    pub fn prepare_writing_file(
         f_len: u64,
         f_offset_start: Option<u64>,
         f_offset_end: Option<u64>,
     ) -> io::Result<Self>
     where
+        R: IsNotFile,
         W: IsFile,
     {
-        let target_len = Self::cal_file_offset(f_len, f_offset_start, f_offset_end)?;
-
-        Self::prepare(None, f_offset_start, Some(target_len))
+        Ok(SpliceIoCtx {
+            offset: Offset::Out(Some(f_offset_start.unwrap_or(0))),
+            size_to_splice: Offset::calc_size_to_splice(f_len, f_offset_start, f_offset_end)?
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "file size too large"))?,
+            ..Self::_prepare()?
+        })
     }
 
-    fn cal_file_offset(
-        f_len: u64,
-        f_offset_start: Option<u64>,
-        f_offset_end: Option<u64>,
-    ) -> io::Result<u64> {
-        match (f_offset_start, f_offset_end) {
-            (_, Some(f_offset_end)) if f_len < f_offset_end => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "error: invalid offset: `f_offset_end` is out of bound of file length",
-            )),
-            _ => f_offset_end
-                .unwrap_or(f_len)
-                .checked_sub(f_offset_start.unwrap_or(0))
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "error: invalid offset: `f_offset_start` is larger than `f_offset_end`",
-                    )
-                }),
+    /// Set the pipe size.
+    ///
+    /// See [`Pipe`]'s top level docs for more details.
+    pub fn set_pipe_size(mut self, pipe_size: usize) -> io::Result<Self> {
+        self.pipe.set_pipe_size(pipe_size)?;
+        Ok(self)
+    }
+}
+
+impl<R, W> SpliceIoCtx<R, W> {
+    #[inline]
+    /// Returns bytes that have been read from `R`.
+    pub(crate) const fn has_read(&self) -> usize {
+        self.has_read
+    }
+
+    #[inline]
+    /// Returns bytes that have been written to `W`.
+    pub(crate) const fn has_written(&self) -> usize {
+        self.has_written
+    }
+}
+
+impl<R, W> SpliceIoCtx<R, W>
+where
+    R: AsFd,
+    W: AsFd,
+{
+    #[cfg_attr(
+        any(
+            feature = "feat-tracing-trace",
+            all(debug_assertions, feature = "feat-tracing")
+        ),
+        tracing::instrument(level = "TRACE", skip_all, err)
+    )]
+    /// Splicing data from `R` to pipe using `splice(2)`
+    ///
+    /// Call this after read done is accepted.
+    ///
+    /// ## Returns
+    ///
+    /// Whether still need to read more data from `R` to pipe.
+    ///
+    /// ## Errors
+    ///
+    /// - Error that `splice(2)` syscall returns.
+    fn splice_from_reader_to_pipe<const BLOCKING: bool>(&mut self, r: &R) -> io::Result<()> {
+        crate::trace!(ctx = ?self, "start `splice_from_reader_to_pipe`");
+
+        let Some(size_rest_to_splice) = self
+            .size_to_splice
+            .checked_sub(self.has_read)
+            .and_then(NonZeroUsize::new)
+        else {
+            crate::info!(ctx = ?self, "data read reached target length");
+
+            self.pipe.close_write_fd();
+
+            return Ok(());
+        };
+
+        let Some(pipe_write_fd) = self.pipe.write_fd() else {
+            crate::trace!(ctx = ?self, "pipe write fd is closed");
+
+            return Ok(());
+        };
+
+        crate::trace!(ctx = ?self, "need `splice_from_reader_to_pipe`");
+
+        match splice(
+            r.as_fd(),
+            self.offset.off_in(),
+            pipe_write_fd,
+            None,
+            size_rest_to_splice.get(),
+            if BLOCKING {
+                SpliceFlags::empty()
+            } else {
+                SpliceFlags::NONBLOCK
+            },
+        )
+        .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
+        {
+            Ok(0) => {
+                crate::trace!(ctx = ?self, "no more data to read, read 0");
+
+                // No more data to read, read 0.
+                self.pipe.close_write_fd();
+
+                return Ok(());
+            }
+            Ok(has_read) => {
+                crate::trace!(ctx = ?self, "read {has_read} bytes from reader");
+
+                self.has_read += has_read;
+
+                Ok(())
+            }
+            Err(e) => {
+                if !BLOCKING && e.kind() != io::ErrorKind::WouldBlock {
+                    self.pipe.close_write_fd();
+                }
+
+                Err(e)
+            }
         }
+    }
+
+    #[inline]
+    fn splice_from_reader_to_pipe_done(&self) -> bool {
+        self.pipe.write_fd().is_none()
+    }
+
+    #[cfg_attr(
+        any(
+            feature = "feat-tracing-trace",
+            all(debug_assertions, feature = "feat-tracing")
+        ),
+        tracing::instrument(level = "TRACE", skip(self, w), ret)
+    )]
+    /// Splicing data from pipe to `W` using `splice(2)`
+    ///
+    /// ## Returns
+    ///
+    /// If there is still data remained in pipe and need to call this again.
+    ///
+    /// ## Errors
+    ///
+    /// - Error that `splice(2)` syscall returns.
+    fn splice_from_pipe_to_writer<const BLOCKING: bool>(&mut self, w: &W) -> io::Result<bool> {
+        const WRITE_DONE: bool = false;
+
+        crate::trace!(ctx = ?self, "start `splice_from_pipe_to_writer`");
+
+        let Some(size_need_to_be_written) = self
+            .has_read
+            .checked_sub(self.has_written)
+            .and_then(NonZeroUsize::new)
+        else {
+            if self.pipe.write_fd().is_none() {
+                crate::trace!(ctx = ?self, "no more data to write from pipe to writer");
+
+                self.pipe.close_read_fd();
+            }
+
+            // No data to write.
+            return Ok(WRITE_DONE);
+        };
+
+        crate::trace!(
+            "size_need_to_be_written: {}, has_written: {}, has_read: {}",
+            size_need_to_be_written,
+            self.has_written,
+            self.has_read
+        );
+
+        let Some(pipe_read_fd) = self.pipe.read_fd() else {
+            // call splice after write done?
+            return Ok(WRITE_DONE);
+        };
+
+        crate::trace!(ctx = ?self, "need `splice_from_pipe_to_writer`");
+
+        match splice(
+            pipe_read_fd,
+            None,
+            w.as_fd(),
+            self.offset.off_out(),
+            size_need_to_be_written.get(),
+            if BLOCKING {
+                SpliceFlags::empty()
+            } else {
+                SpliceFlags::NONBLOCK
+            },
+        )
+        .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
+        {
+            Ok(0) => Err(io::ErrorKind::WriteZero.into()),
+            Ok(has_written) => {
+                self.need_flush = true;
+                self.has_written += has_written;
+
+                crate::trace!(
+                    ctx = ?self,
+                    "wrote {} bytes to writer", has_written
+                );
+
+                Ok(
+                    NonZeroUsize::new(self.has_read.checked_sub(self.has_written).ok_or_else(
+                        || {
+                            // If `has_written` is larger than `has_read`, may never stop.
+                            // In particular, user's wrong implementation returning
+                            // incorrect written length may lead to thread blocking.
+
+                            io::Error::new(
+                                io::ErrorKind::Other,
+                                "`has_written` larger than `has_read`",
+                            )
+                        },
+                    )?)
+                    .is_some(),
+                )
+            }
+            Err(e) => {
+                if !BLOCKING && e.kind() != io::ErrorKind::WouldBlock {
+                    self.pipe.close_read_fd();
+                }
+
+                Err(e)
+            }
+        }
+    }
+
+    #[inline]
+    fn splice_from_pipe_to_writer_done(&self) -> bool {
+        self.pipe.read_fd().is_none()
+    }
+
+    #[inline]
+    fn full_done(&self) -> bool {
+        (self.splice_from_reader_to_pipe_done())
+            && self.splice_from_pipe_to_writer_done()
+            && !self.need_flush
     }
 }
 
@@ -197,124 +455,43 @@ where
     R: ReadFd,
     W: WriteFd,
 {
+    #[inline]
     #[cfg_attr(
-        feature = "feat-tracing",
-        tracing::instrument(level = "TRACE", skip(r, w), err)
+        any(
+            feature = "feat-tracing-trace",
+            all(debug_assertions, feature = "feat-tracing")
+        ),
+        tracing::instrument(level = "TRACE", skip(self, r, w), ret)
     )]
-    /// Copy data from `r` to `w` using `splice(2)`, but blocking.
-    pub fn blocking_copy(mut self, r: &mut R, w: &mut W) -> io::Result<usize> {
-        loop {
+    /// Copy data from `r` to `w` using `splice(2)`, but blocking mode.
+    ///
+    /// If you need bidirectional copy, you SHOULD spawn two
+    /// [`thread`](std::thread)s, one for reading side `blocking_copy` and
+    /// one for writing side `blocking_copy`.
+    ///
+    /// For blocking mode copy, the `r` and `w` MUST NOT be non-blocking mode.
+    pub fn blocking_copy(mut self, r: &mut R, w: &mut W) -> io::Result<TrafficResult> {
+        let ret = self._blocking_copy(r, w);
+
+        TrafficResult::new_from_io_result(&self, None, ret)
+    }
+
+    fn _blocking_copy(&mut self, r: &mut R, w: &mut W) -> io::Result<()> {
+        while !self.full_done() {
             if self.need_flush {
-                #[cfg(feature = "feat-tracing")]
-                tracing::trace!("start `flush`");
+                crate::trace!(ctx = ?self, "start `flush`");
 
                 w.flush()?;
+
                 self.need_flush = false;
             }
 
-            if !self.read_done && self.has_written == self.has_read {
-                // * when read not done and has written all data to `w` from pipe, try read more
-                // * to pipe.
+            self.splice_from_reader_to_pipe::<BLOCKING_SPLICE>(r)?;
 
-                #[cfg(feature = "feat-tracing")]
-                tracing::trace!("start reading from reader to pipe");
-
-                let has_read = splice(
-                    r.as_fd(),
-                    self.off_in.as_mut(),
-                    self.pipe.write_fd(),
-                    None,
-                    (self.target_len.unwrap_or(isize::MAX as u64) as usize)
-                        .saturating_sub(self.has_read),
-                    SpliceFlags::NONBLOCK,
-                )
-                .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()));
-
-                match has_read {
-                    Ok(has_read) => {
-                        if self.last_read == has_read && has_read == 0 {
-                            #[cfg(feature = "feat-tracing")]
-                            tracing::trace!("no more data to read, read 0");
-                            // no more data to read, read 0
-                            self.read_done = true;
-                        }
-
-                        self.last_read = has_read;
-                        self.has_read += has_read;
-
-                        if self.has_read >= self.target_len.unwrap_or(isize::MAX as u64) as usize {
-                            // reached target length
-                            self.read_done = true;
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        #[cfg(feature = "feat-tracing")]
-                        tracing::trace!("Would block, continue");
-
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-
-            // If has_written is larger than has_read, this loop will never stop.
-            // In particular, user's wrong poll_write implementation returning
-            // incorrect written length may lead to thread blocking.
-            match self.has_written.cmp(&self.has_read) {
-                cmp::Ordering::Less => {
-                    // continue to write
-                    let has_written = splice(
-                        self.pipe.read_fd(),
-                        None,
-                        w.as_fd(),
-                        self.off_out.as_mut(),
-                        self.has_read - self.has_written,
-                        SpliceFlags::NONBLOCK,
-                    )
-                    .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()));
-
-                    match has_written {
-                        Ok(0) => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::WriteZero,
-                                "write zero byte into writer",
-                            ));
-                        }
-                        Ok(has_written) => {
-                            self.last_write = has_written;
-                            self.has_written += has_written;
-                            self.need_flush = true;
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            #[cfg(feature = "feat-tracing")]
-                            tracing::trace!("Would block, continue");
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                cmp::Ordering::Equal if self.read_done => {
-                    w.flush()?;
-                    self.need_flush = false;
-                    return Ok(self.has_written);
-                }
-                cmp::Ordering::Equal => {
-                    // Writer has no more data to write, but reader has not
-                    // finished reading.
-                }
-                cmp::Ordering::Greater => {
-                    #[cfg(feature = "feat-nightly")]
-                    std::hint::cold_path();
-
-                    #[cfg(debug_assertions)]
-                    unreachable!("fatal error: writer returned length larger than input slice");
-
-                    #[cfg(not(debug_assertions))]
-                    return Err(io::Error::other(
-                        "fatal error: writer returned length larger than input slice",
-                    ));
-                }
-            }
+            while self.splice_from_pipe_to_writer::<BLOCKING_SPLICE>(w)? {}
         }
+
+        Ok(())
     }
 }
 
@@ -323,266 +500,204 @@ where
     R: AsyncReadFd,
     W: AsyncWriteFd,
 {
-    #[cfg_attr(
-        feature = "feat-tracing",
-        tracing::instrument(level = "TRACE", skip_all, err)
-    )]
+    #[inline]
     /// Copy data from `r` to `w` using `splice(2)`.
+    pub async fn copy(
+        mut self,
+        mut r: Pin<&mut R>,
+        mut w: Pin<&mut W>,
+    ) -> io::Result<TrafficResult> {
+        let ret = poll_fn(|cx| self.poll_copy(cx, r.as_mut(), w.as_mut())).await;
+
+        TrafficResult::new_from_io_result(&self, None, ret)
+    }
+
+    #[cfg_attr(
+        any(
+            feature = "feat-tracing-trace",
+            all(debug_assertions, feature = "feat-tracing")
+        ),
+        tracing::instrument(level = "TRACE", skip(self, cx, r, w), fields(pipe = ?self.pipe), ret)
+    )]
+    /// Polling version of [`copy`](Self::copy).
     ///
-    /// After the future resolves, the bytes transferred from `r` to `w` will be
-    /// returned.
-    pub async fn copy(self, mut r: Pin<&mut R>, mut w: Pin<&mut W>) -> io::Result<usize> {
-        let mut this = pin!(self);
-
-        poll_fn(|cx| Poll::Ready(ready!(this.as_mut().poll_copy(cx, r.as_mut(), w.as_mut())))).await
-    }
-
-    #[cfg_attr(
-        feature = "feat-tracing",
-        tracing::instrument(level = "TRACE", skip(cx, r))
-    )]
-    fn poll_fill_buf(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        r: Pin<&mut R>,
-    ) -> Poll<io::Result<usize>> {
-        let this = self.project();
-
-        loop {
-            ready!(r.poll_read_ready(cx))?;
-
-            let has_read = r.try_io_read(|| {
-                // ! overflow when target_len > u32::MAX on 32 bit system?
-                splice(
-                    r.as_fd(),
-                    this.off_in.as_mut(),
-                    this.pipe.write_fd(),
-                    None,
-                    (this.target_len.unwrap_or(isize::MAX as u64) as usize)
-                        .saturating_sub(*this.has_read),
-                    SpliceFlags::NONBLOCK,
-                )
-                .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
-            });
-
-            match has_read {
-                Ok(has_read) => {
-                    if *this.last_read == has_read && has_read == 0 {
-                        #[cfg(feature = "feat-tracing")]
-                        tracing::trace!("no more data to read, read 0");
-                        // no more data to read, read 0
-                        *this.read_done = true;
-                    }
-
-                    *this.last_read = has_read;
-                    *this.has_read += has_read;
-
-                    // dbg!(format!(
-                    //     "current -> 0x{:x}",
-                    //     self.has_read
-                    // ));
-
-                    if *this.has_read >= this.target_len.unwrap_or(isize::MAX as u64) as usize {
-                        // reached target length
-                        *this.read_done = true;
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    #[cfg(feature = "feat-tracing")]
-                    tracing::trace!("Would block, continue");
-
-                    continue;
-                }
-                Err(e) => return Poll::Ready(Err(e)),
-            }
-
-            break Poll::Ready(has_read);
-        }
-    }
-
-    #[cfg_attr(
-        feature = "feat-tracing",
-        tracing::instrument(level = "TRACE", skip(cx, w))
-    )]
-    fn poll_write_buf(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        w: Pin<&mut W>,
-    ) -> Poll<io::Result<usize>> {
-        let this = self.project();
-
-        loop {
-            ready!(w.poll_write_ready(cx)?);
-
-            let has_written = w.try_io_write(|| {
-                splice(
-                    this.pipe.read_fd(),
-                    None,
-                    w.as_fd(),
-                    this.off_out.as_mut(),
-                    *this.has_read - *this.has_written,
-                    SpliceFlags::NONBLOCK,
-                )
-                .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
-            });
-
-            match has_written {
-                Ok(0) => {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "write zero byte into writer",
-                    )));
-                }
-                Ok(has_written) => {
-                    *this.last_write = has_written;
-                    *this.has_written += has_written;
-                    *this.need_flush = true;
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    #[cfg(feature = "feat-tracing")]
-                    tracing::trace!("Would block, continue");
-
-                    continue;
-                }
-                Err(e) => return Poll::Ready(Err(e)),
-            }
-
-            break Poll::Ready(has_written);
-        }
-    }
-
-    #[cfg_attr(
-        feature = "feat-tracing",
-        tracing::instrument(level = "TRACE", skip(cx, r, w))
-    )]
-    /// Do zero-copy IO from `r` to `w` with `splice(2)`.
+    /// Notice
+    ///
+    /// - The caller MUST NOT reuse the `SpliceIoCtx` after copy finished.
+    /// - The traffic result is not returned, please use
+    ///   [`TrafficResult::new_from_io_result`] after copy done (successfully or
+    ///   not).
     pub fn poll_copy(
-        mut self: Pin<&mut Self>,
+        &mut self,
         cx: &mut Context<'_>,
         mut r: Pin<&mut R>,
         mut w: Pin<&mut W>,
-    ) -> Poll<io::Result<usize>> {
-        loop {
+    ) -> Poll<io::Result<()>> {
+        while !self.full_done() {
+            crate::trace!(ctx = ?self, "loop `poll_copy`");
+
+            ready!(self.poll_splice_from_reader_to_pipe(cx, r.as_mut()))?;
+
             if self.need_flush {
-                #[cfg(feature = "feat-tracing")]
-                tracing::trace!("start `poll_flush`");
+                crate::trace!(ctx = ?self, "start `poll_flush`");
 
                 // Try flushing when the reader has no progress to avoid deadlock
                 // when the reader depends on buffered writer.
-
                 ready!(w.as_mut().poll_flush(cx))?;
-
-                #[cfg(feature = "feat-tracing")]
-                tracing::trace!("poll_flush finished");
 
                 self.need_flush = false;
             }
 
-            if !self.read_done && self.has_written == self.has_read {
-                // * when read not done and has written all data to `w` from pipe, try read more
-                // * to pipe.
+            ready!(self.poll_splice_from_pipe_to_writer(cx, w.as_mut()))?;
+        }
 
-                #[cfg(feature = "feat-tracing")]
-                tracing::trace!("start `poll_fill_buf`");
+        Poll::Ready(Ok(()))
+    }
 
-                // Fill the buffer to be written.
-                let _op_has_read = ready!(self.as_mut().poll_fill_buf(cx, r.as_mut()))?;
+    #[cfg_attr(
+        any(
+            feature = "feat-tracing-trace",
+            all(debug_assertions, feature = "feat-tracing")
+        ),
+        tracing::instrument(level = "TRACE", skip(self, cx, r), ret)
+    )]
+    fn poll_splice_from_reader_to_pipe(
+        &mut self,
+        cx: &mut Context<'_>,
+        r: Pin<&mut R>,
+    ) -> Poll<io::Result<()>> {
+        crate::trace!(ctx = ?self, "start `poll_splice_from_reader_to_pipe`");
 
-                #[cfg(feature = "feat-tracing")]
-                tracing::trace!(op_has_read = _op_has_read, "poll_fill_buf finished");
+        if self.splice_from_reader_to_pipe_done() || self.has_read != self.has_written {
+            return Poll::Ready(Ok(()));
+        }
+
+        ready!(r.poll_read_ready(cx))?;
+        match r.try_io_read(|| self.splice_from_reader_to_pipe::<NONBLOCKING_SPLICE>(&r)) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                crate::trace!(ctx = ?self, "`poll_splice_from_reader_to_pipe` would block");
+
+                // FIXME: tricky - alternative ways to wake up the task? epoll?
+                cx.waker().wake_by_ref();
+
+                Poll::Pending
             }
+            r => Poll::Ready(r),
+        }
+    }
 
-            'poll_write_buf: loop {
-                #[cfg(feature = "feat-tracing")]
-                tracing::trace!("`poll_write_buf` looping");
+    #[cfg_attr(
+        any(
+            feature = "feat-tracing-trace",
+            all(debug_assertions, feature = "feat-tracing")
+        ),
+        tracing::instrument(level = "TRACE", skip(self, cx, w), ret)
+    )]
+    fn poll_splice_from_pipe_to_writer(
+        &mut self,
+        cx: &mut Context<'_>,
+        w: Pin<&mut W>,
+    ) -> Poll<io::Result<bool>> {
+        ready!(w.poll_write_ready(cx))?;
 
-                // If has_written is larger than has_read, this loop will never stop.
-                // In particular, user's wrong poll_write implementation returning
-                // incorrect written length may lead to thread blocking.
-                match self.has_written.cmp(&self.has_read) {
-                    cmp::Ordering::Less => {
-                        ready!(self.as_mut().poll_write_buf(cx, w.as_mut()))?;
-                    }
-                    cmp::Ordering::Equal if self.read_done => {
-                        if self.need_flush {
-                            ready!(w.as_mut().poll_flush(cx))?;
-                        }
+        match w.try_io_write(|| self.splice_from_pipe_to_writer::<NONBLOCKING_SPLICE>(&w)) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                crate::trace!(ctx = ?self, "`splice_from_pipe_to_writer` would block");
 
-                        return Poll::Ready(Ok(self.has_written));
-                    }
-                    cmp::Ordering::Equal => {
-                        // Writer has no more data to write, but reader has not finished reading.
-                        break 'poll_write_buf;
-                    }
-                    cmp::Ordering::Greater => {
-                        #[cfg(feature = "feat-nightly")]
-                        std::hint::cold_path();
+                // FIXME: tricky - alternative ways to wake up the task? epoll?
+                cx.waker().wake_by_ref();
 
-                        #[cfg(debug_assertions)]
-                        unreachable!("fatal error: writer returned length larger than input slice");
-
-                        #[cfg(not(debug_assertions))]
-                        return Poll::Ready(Err(io::Error::other(
-                            "fatal error: writer returned length larger than input slice",
-                        )));
-                    }
-                }
+                Poll::Pending
             }
+            r => Poll::Ready(r),
         }
     }
 }
 
 impl<A, B> SpliceIoCtx<A, B>
 where
-    A: AsyncReadFd + AsyncWriteFd,
-    B: AsyncReadFd + AsyncWriteFd,
+    A: AsyncReadFd + AsyncWriteFd + IsNotFile,
+    B: AsyncReadFd + AsyncWriteFd + IsNotFile,
 {
-    #[cfg_attr(
-        feature = "feat-tracing",
-        tracing::instrument(level = "TRACE", skip_all, err)
-    )]
-    /// Copy data bidirectionally between `a` and `b` with `splice(2)`.
+    /// Copy data bidirectionally between `A` and `B`.
     ///
-    /// This function returns a future that will read from both streams,
-    /// writing any data read to the opposing stream. This happens in both
-    /// directions concurrently.
-    ///
-    /// After the future resolves, the bytes transferred from `a` to `b` and
-    /// from `b` to `a` will be returned as a tuple `(a_to_b, b_to_a)`.
+    /// Notice: the caller MUST NOT reuse the `SpliceIoCtx` after copy done.
     pub async fn copy_bidirectional(
+        mut ctx_a_to_b: SpliceIoCtx<A, B>,
+        mut ctx_b_to_a: SpliceIoCtx<B, A>,
         mut a: Pin<&mut A>,
         mut b: Pin<&mut B>,
-    ) -> io::Result<(usize, usize)> {
-        let mut io_a_to_b = pin!(SpliceIoCtx::prepare(None, None, None)?);
-        let mut io_b_to_a = pin!(SpliceIoCtx::prepare(None, None, None)?);
-
-        poll_fn(|cx| {
-            // Do not `ready!(io_a_to_b.poll_copy(cx, a.as_mut(), b.as_mut())?)`, or
-            // `b_to_a` will never be polled.
-
-            match (
-                io_a_to_b.as_mut().poll_copy(cx, a.as_mut(), b.as_mut()),
-                io_b_to_a.as_mut().poll_copy(cx, b.as_mut(), a.as_mut()),
-            ) {
-                (Poll::Ready(Ok(a_to_b)), Poll::Ready(Ok(b_to_a))) => {
-                    Poll::Ready(Ok((a_to_b, b_to_a)))
-                }
-                (Poll::Ready(Err(e)), _) | (_, Poll::Ready(Err(e))) => {
-                    // If any of the futures returns an error, we return the error.
-                    Poll::Ready(Err(e))
-                }
-                _ => {
-                    // If any of the futures is not ready, we return Poll::Pending.
-                    // This will cause the caller to poll again.
-                    Poll::Pending
-                }
-            }
+    ) -> io::Result<TrafficResult> {
+        let ret = poll_fn(|cx| {
+            Self::poll_copy_bidirectional(
+                cx,
+                &mut ctx_a_to_b,
+                &mut ctx_b_to_a,
+                a.as_mut(),
+                b.as_mut(),
+            )
         })
-        .await
+        .await;
+
+        TrafficResult::new_from_io_result(&ctx_a_to_b, Some(&ctx_b_to_a), ret)
+    }
+
+    /// Polling version of [`copy_bidirectional`](Self::copy_bidirectional).
+    ///
+    /// Notice
+    ///
+    /// - The caller MUST NOT reuse the `SpliceIoCtx` after copy finished.
+    /// - The traffic result is not returned, please use
+    ///   [`TrafficResult::new_from_io_result`] after copy done (successfully or
+    ///   not).
+    pub fn poll_copy_bidirectional(
+        cx: &mut Context<'_>,
+        ctx_a_to_b: &mut SpliceIoCtx<A, B>,
+        ctx_b_to_a: &mut SpliceIoCtx<B, A>,
+        mut a: Pin<&mut A>,
+        mut b: Pin<&mut B>,
+    ) -> Poll<io::Result<()>> {
+        match (
+            ctx_a_to_b.poll_copy(cx, a.as_mut(), b.as_mut()),
+            ctx_b_to_a.poll_copy(cx, b.as_mut(), a.as_mut()),
+        ) {
+            (r @ Poll::Ready(Ok(_)), Poll::Ready(Ok(_))) => r,
+            (e @ Poll::Ready(Err(_)), _) | (_, e @ Poll::Ready(Err(_))) => e,
+            _ => {
+                crate::trace!("`poll_copy_bidirectional` would block");
+                Poll::Pending
+            }
+        }
     }
 }
 
-/// Marker trait: indicates a async-readable file descriptor.
+// === traits ===
+
+/// Marker trait: indicate a file.
+///
+/// Since the compiler complains that conflicting implementations when we try to
+/// implement `IsFile` for `T: ops::Deref<U>` when U: `IsFile`, you have to
+/// implement this marker trait for your wrapper type over a file.
+pub trait IsFile {}
+
+impl<T> IsFile for &T where T: IsFile {}
+impl<T> IsFile for &mut T where T: IsFile {}
+impl<T> IsFile for Pin<&mut T> where T: IsFile {}
+
+/// Marker trait: indicate not a file.
+///
+/// We have to introduce this because Rust does not allow the syntax `!IsFile`
+/// (at least only limited to some builtin marker traits like `Send`),
+pub trait IsNotFile {}
+
+impl<T> IsNotFile for &T where T: IsNotFile {}
+impl<T> IsNotFile for &mut T where T: IsNotFile {}
+impl<T> IsNotFile for Pin<&mut T> where T: IsNotFile {}
+
+/// Marker trait: indicates an async-readable file descriptor.
+///
+/// This trait extends both `AsyncRead` and `AsFd`, providing the necessary
+/// methods for async reading operations with splice.
 pub trait AsyncReadFd: AsyncRead + AsFd {
     #[doc(hidden)]
     fn poll_read_ready(&self, _cx: &mut Context<'_>) -> Poll<io::Result<()>>;
@@ -601,7 +716,10 @@ impl<T: AsyncReadFd + Unpin> AsyncReadFd for &mut T {
     }
 }
 
-/// Marker trait: indicate a async-writable file descriptor.
+/// Marker trait: indicates an async-writable file descriptor.
+///
+/// This trait extends both `AsyncWrite` and `AsFd`, providing the necessary
+/// methods for async writing operations with splice.
 pub trait AsyncWriteFd: AsyncWrite + AsFd {
     #[doc(hidden)]
     fn poll_write_ready(&self, _cx: &mut Context<'_>) -> Poll<io::Result<()>>;
@@ -642,6 +760,8 @@ macro_rules! impl_async_fd {
                     self.try_io(Interest::WRITABLE, f)
                 }
             }
+
+            impl IsNotFile for $ty {}
         )+
     };
     (FILE: $($ty:ty),+) => {
@@ -655,6 +775,7 @@ macro_rules! impl_async_fd {
                     f()
                 }
             }
+
             impl AsyncWriteFd for $ty {
                 fn poll_write_ready(&self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
                     Poll::Ready(Ok(()))
@@ -664,6 +785,8 @@ macro_rules! impl_async_fd {
                     f()
                 }
             }
+
+            impl IsFile for $ty {}
         )+
     };
 }
@@ -671,12 +794,12 @@ macro_rules! impl_async_fd {
 impl_async_fd!(AsyncTcpStream, AsyncUnixStream);
 impl_async_fd!(FILE: AsyncFile);
 
-/// Trait for file descriptors that should be flushed.
+/// Trait for readable file descriptors.
 pub trait ReadFd: io::Read + AsFd {}
 
 impl<T: ReadFd> ReadFd for &mut T {}
 
-/// Trait for file descriptors that should be flushed.
+/// Trait for writable file descriptors.
 pub trait WriteFd: io::Write + AsFd {}
 
 impl<T: WriteFd> WriteFd for &mut T {}
@@ -686,20 +809,17 @@ macro_rules! impl_fd {
         $(
             impl ReadFd for $ty {}
             impl WriteFd for $ty {}
+            impl IsNotFile for $ty {}
+        )+
+    };
+    (FILE: $($ty:ty),+) => {
+        $(
+            impl ReadFd for $ty {}
+            impl WriteFd for $ty {}
+            impl IsFile for $ty {}
         )+
     };
 }
 
-impl_fd!(File, TcpStream, UnixStream);
-
-/// Marker trait: indicate a file.
-///
-/// Since the compiler complains that conflicting implementations when we try to
-/// implement `IsFile` for `T: ops::Deref<U>` when U: `IsFile`, you have to
-/// implement this marker trait for your wrapper type over a file.
-pub trait IsFile {}
-
-impl<T> IsFile for &T where T: IsFile {}
-
-impl IsFile for File {}
-impl IsFile for AsyncFile {}
+impl_fd!(TcpStream, UnixStream);
+impl_fd!(FILE: File);

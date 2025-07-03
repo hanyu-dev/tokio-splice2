@@ -23,7 +23,10 @@ async fn main() -> io::Result<()> {
 }
 
 async fn serve() -> io::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:8989").await?;
+    let listener = TcpListener::bind(
+        env::var("EXAMPLE_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:5201".to_string()),
+    )
+    .await?;
 
     loop {
         let (incoming, remote_addr) = match listener.accept().await {
@@ -33,7 +36,7 @@ async fn serve() -> io::Result<()> {
                 continue;
             }
             Err(e) => {
-                eprintln!("Failed to accept: {:#?}", e);
+                eprintln!("Failed to accept: {e:#?}");
                 break Err(e);
             }
         };
@@ -45,23 +48,46 @@ async fn serve() -> io::Result<()> {
 }
 
 async fn forwarding(mut stream1: TcpStream) -> io::Result<()> {
-    let mut stream2 = TcpStream::connect(
-        env::var("EXAMPLE_REMOTE_ADDR").unwrap_or_else(|_| "4.ipw.cn:80".to_string()),
+    let stream2 = TcpStream::connect(
+        env::var("EXAMPLE_REMOTE_ADDR").unwrap_or_else(|_| "127.0.0.1:5202".to_string()),
     )
-    .await
-    .inspect_err(|e| {
-        eprintln!("Failed to connect to remote server: {e}");
-    })?;
+    .await;
 
-    tokio_splice2::copy_bidirectional(&mut stream1, &mut stream2)
-        .await
-        .inspect(|(r, w)| {
+    let mut stream2 = match stream2 {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to connect to remote server: {e}");
+            return Err(e);
+        }
+    };
+
+    // let result = tokio_splice::zero_copy_bidirectional(&mut stream1, &mut
+    // stream2).await;
+    let instant = std::time::Instant::now();
+    let result = tokio_splice2::copy_bidirectional(&mut stream1, &mut stream2).await;
+    // let result = realm_io::bidi_zero_copy(&mut stream1, &mut stream2).await;
+
+    match result {
+        Ok(traffic) => {
+            let total = traffic.sum();
+            let cost = instant.elapsed();
             println!(
-                "Forwarded {r} bytes from stream1 to stream2, {w} bytes from stream2 to stream1"
+                "Forwarded traffic: {traffic:?}, total: {}, time: {:.2}s, avg: {}",
+                human_format_next::Formatter::BINARY
+                    .with_custom_unit("B")
+                    .with_decimals::<4>()
+                    .format(total as f64),
+                cost.as_secs_f64(),
+                human_format_next::Formatter::BINARY
+                    .with_custom_unit("B/s")
+                    .with_decimals::<4>()
+                    .format(total as f64 / cost.as_secs_f64())
             );
-        })
-        .inspect_err(|e| {
+            Ok(())
+        }
+        Err(e) => {
             eprintln!("Failed to copy data: {e}");
-        })?;
-    Ok(())
+            Err(e)
+        }
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "tokio-splice2"
-version = "0.3.0-alpha.10"
+version = "0.3.0-alpha.11"
 edition = "2021"
 rust-version = "1.70.0"
 
@@ -13,17 +13,23 @@ readme = "README.md"
 repository = "https://github.com/hanyu-dev/tokio-splice2"
 
 [dependencies]
-pin-project-lite = "0.2.16"
 rustix = { version = "1.0.0", features = ["pipe"] }
-tokio = { version = "1.39.0", features = ["fs", "net"] }
+tokio = { version = "1.46.0", features = ["fs", "net"] }
 tracing = { version = "0.1.41", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.39.0", features = ["net", "macros", "rt", "signal", "io-util", "time"] }
+human-format-next = "0.2.2"
+rand = "0.9.1"
+tokio = { version = "1.46.0", features = ["net", "macros", "rt", "signal", "io-util", "time"] }
+
 
 [features]
-# Enable tracing support
+default = ["feat-tracing"]
+
+# Enable crate `tracing` support
 feat-tracing = ["dep:tracing"]
+# Enable crate `tracing` support and enable Level::TRACE log in release profile build.
+feat-tracing-trace = ["feat-tracing"]
 
 # Enable nightly Rust feature
 feat-nightly = []
