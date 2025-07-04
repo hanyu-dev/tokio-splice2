@@ -10,54 +10,63 @@
 //! [`pipe(7)`]: https://man7.org/linux/man-pages/man7/pipe.7.html
 //! [`fcntl(2)`]: https://man7.org/linux/man-pages/man2/fcntl.2.html
 
-use std::{fmt, io};
+// FIXME: Pipe pool?
+
+use std::{io, mem};
 
 use rustix::fd::OwnedFd;
 use rustix::pipe::{fcntl_setpipe_size, pipe_with, PipeFlags};
 
+/// `MAXIMUM_PIPE_SIZE` is the maximum amount of data we asks
+/// the kernel to move in a single call to `splice(2)`.
+///
+/// We use 1MB as `splice(2)` writes data through a pipe, and 1MB is the default
+/// maximum pipe buffer size, which is determined by
+/// `/proc/sys/fs/pipe-max-size`.
+///
+/// Running applications under unprivileged user may have the pages usage
+/// limited. See [`pipe(7)`] for details.
+///
+/// [`pipe(7)`]: https://man7.org/linux/man-pages/man7/pipe.7.html
+pub const MAXIMUM_PIPE_SIZE: usize = 1 << 20;
+
+#[derive(Debug)]
 /// Linux Pipe.
 pub struct Pipe {
     /// File descriptor for reading from the pipe
-    read_fd: Option<OwnedFd>,
+    read_side_fd: Fd,
 
     /// File descriptor for writing to the pipe
-    write_fd: Option<OwnedFd>,
+    write_side_fd: Fd,
 }
 
-impl fmt::Debug for Pipe {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Pipe")
-            .field(
-                "read_fd",
-                match self.read_fd {
-                    Some(ref fd) => fd,
-                    None => &"(closed)",
-                },
-            )
-            .field(
-                "write_fd",
-                match self.write_fd {
-                    Some(ref fd) => fd,
-                    None => &"(closed)",
-                },
-            )
-            .finish()
-    }
+#[derive(Debug)]
+enum Fd {
+    Running(OwnedFd),
+    Closed,
 }
 
 impl Pipe {
     /// Create a pipe, with flags `O_NONBLOCK` and `O_CLOEXEC`.
+    ///
+    /// The default pipe size is set to `65536` bytes.
     pub(crate) fn new() -> io::Result<Self> {
+        // Create a pipe with `O_CLOEXEC` flags.
         pipe_with(PipeFlags::NONBLOCK | PipeFlags::CLOEXEC)
+            .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
             .map(|(read_fd, write_fd)| {
-                let _act = fcntl_setpipe_size(&write_fd, 4096 * 64);
-                // println!("Set pipe size to: {:?}", act);
+                // Splice will loop writing MAXIMUM_PIPE_SIZE bytes from the source to the pipe,
+                // and then write those bytes from the pipe to the destination.
+                // Set the pipe buffer size to MAXIMUM_PIPE_SIZE to optimize that.
+                // Ignore errors here, as a smaller buffer size will work,
+                // although it will require more system calls.
+                let _ = fcntl_setpipe_size(&read_fd, MAXIMUM_PIPE_SIZE);
+
                 Self {
-                    read_fd: Some(read_fd),
-                    write_fd: Some(write_fd),
+                    read_side_fd: Fd::Running(read_fd),
+                    write_side_fd: Fd::Running(write_fd),
                 }
             })
-            .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
     }
 
     /// Customize the pipe size.
@@ -66,46 +75,51 @@ impl Pipe {
     ///
     /// [`fcntl(2)`]: https://man7.org/linux/man-pages/man2/fcntl.2.html.
     pub(crate) fn set_pipe_size(&mut self, pipe_size: usize) -> io::Result<usize> {
-        if let Some(write_fd) = self.write_fd.as_ref() {
-            fcntl_setpipe_size(write_fd, pipe_size)
+        if let Fd::Running(read_side_fd) = &self.read_side_fd {
+            fcntl_setpipe_size(read_side_fd, pipe_size)
                 .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Cannot set pipe size on a closed write end",
-            ))
+            Err(io::Error::new(io::ErrorKind::Other, "pipe closed"))
         }
     }
 
-    #[inline(always)]
-    /// Get the pipe read side file descriptor.
-    ///
-    /// This method returns an `Option<&OwnedFd>`, which is `Some` if the pipe
-    /// read side file descriptor is available, or `None` if it has been
-    /// closed.
-    pub(crate) const fn read_fd(&self) -> Option<&OwnedFd> {
-        self.read_fd.as_ref()
+    #[inline]
+    pub(super) const fn write_side_fd(&self) -> Option<&OwnedFd> {
+        match &self.write_side_fd {
+            Fd::Running(fd) => Some(fd),
+            Fd::Closed => None,
+        }
     }
 
-    #[inline(always)]
-    /// Close the pipe read side file descriptor.
-    pub(crate) fn close_read_fd(&mut self) {
-        self.read_fd.take();
-    }
-
-    #[inline(always)]
-    /// Get the pipe write side file descriptor.
-    ///
-    /// This method returns an `Option<&OwnedFd>`, which is `Some` if the pipe
-    /// write side file descriptor is available, or `None` if it has been
-    /// closed.
-    pub(crate) const fn write_fd(&self) -> Option<&OwnedFd> {
-        self.write_fd.as_ref()
+    #[must_use]
+    #[inline]
+    pub(crate) const fn splice_drain_finished(&self) -> bool {
+        matches!(self.write_side_fd, Fd::Closed)
     }
 
     #[inline(always)]
     /// Close the pipe write side file descriptor.
-    pub(crate) fn close_write_fd(&mut self) {
-        self.write_fd.take();
+    pub(crate) fn set_splice_drain_finished(&mut self) {
+        let _ = mem::replace(&mut self.write_side_fd, Fd::Closed);
+    }
+
+    #[inline]
+    pub(super) const fn read_side_fd(&self) -> Option<&OwnedFd> {
+        match &self.read_side_fd {
+            Fd::Running(fd) => Some(fd),
+            Fd::Closed => None,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) const fn splice_pump_finished(&self) -> bool {
+        matches!(self.read_side_fd, Fd::Closed)
+    }
+
+    #[inline(always)]
+    /// Close the pipe read side file descriptor.
+    pub(crate) fn set_splice_pump_finished(&mut self) {
+        let _ = mem::replace(&mut self.read_side_fd, Fd::Closed);
     }
 }

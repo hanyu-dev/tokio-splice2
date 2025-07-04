@@ -96,7 +96,7 @@ func forwarding(stream1 net.Conn) error {
 
 	result, err := copyBidirectional(stream1, stream2)
 
-	fmt.Printf("Forwarded traffic: %+v\n", result)
+	fmt.Printf("Forwarded traffic: %+v, avg: %.4f GiB/s\n", result, float64((result.BytesForward+result.BytesReverse)/1024/1024/1024)/10.0)
 
 	if err != nil {
 		log.Printf("Failed to copy data: %v", err)

@@ -83,9 +83,6 @@ impl Offset {
     }
 }
 
-const BLOCKING_SPLICE: bool = true;
-const NONBLOCKING_SPLICE: bool = false;
-
 /// Zero-copy IO with `splice(2)`.
 ///
 /// Notice: see the [module-level documentation](crate) for known limitations.
@@ -270,8 +267,8 @@ where
     /// ## Errors
     ///
     /// - Error that `splice(2)` syscall returns.
-    fn splice_from_reader_to_pipe<const BLOCKING: bool>(&mut self, r: &R) -> io::Result<()> {
-        crate::trace!(ctx = ?self, "start `splice_from_reader_to_pipe`");
+    fn splice_drain(&mut self, r: &R, flags: SpliceFlags) -> io::Result<()> {
+        crate::trace!(ctx = ?self, "start `splice_drain`");
 
         let Some(size_rest_to_splice) = self
             .size_to_splice
@@ -280,13 +277,13 @@ where
         else {
             crate::info!(ctx = ?self, "data read reached target length");
 
-            self.pipe.close_write_fd();
+            self.pipe.set_splice_drain_finished();
 
             return Ok(());
         };
 
-        let Some(pipe_write_fd) = self.pipe.write_fd() else {
-            crate::trace!(ctx = ?self, "pipe write fd is closed");
+        let Some(pipe_write_side_fd) = self.pipe.write_side_fd() else {
+            crate::trace!(ctx = ?self, "pipe write side fd is closed");
 
             return Ok(());
         };
@@ -296,14 +293,10 @@ where
         match splice(
             r.as_fd(),
             self.offset.off_in(),
-            pipe_write_fd,
+            pipe_write_side_fd,
             None,
             size_rest_to_splice.get(),
-            if BLOCKING {
-                SpliceFlags::empty()
-            } else {
-                SpliceFlags::NONBLOCK
-            },
+            flags,
         )
         .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
         {
@@ -311,7 +304,7 @@ where
                 crate::trace!(ctx = ?self, "no more data to read, read 0");
 
                 // No more data to read, read 0.
-                self.pipe.close_write_fd();
+                self.pipe.set_splice_drain_finished();
 
                 return Ok(());
             }
@@ -323,18 +316,13 @@ where
                 Ok(())
             }
             Err(e) => {
-                if !BLOCKING && e.kind() != io::ErrorKind::WouldBlock {
-                    self.pipe.close_write_fd();
+                if e.kind() != io::ErrorKind::WouldBlock {
+                    self.pipe.set_splice_drain_finished();
                 }
 
                 Err(e)
             }
         }
-    }
-
-    #[inline]
-    fn splice_from_reader_to_pipe_done(&self) -> bool {
-        self.pipe.write_fd().is_none()
     }
 
     #[cfg_attr(
@@ -353,20 +341,20 @@ where
     /// ## Errors
     ///
     /// - Error that `splice(2)` syscall returns.
-    fn splice_from_pipe_to_writer<const BLOCKING: bool>(&mut self, w: &W) -> io::Result<bool> {
+    fn splice_pump(&mut self, w: &W, flag: SpliceFlags) -> io::Result<bool> {
         const WRITE_DONE: bool = false;
 
-        crate::trace!(ctx = ?self, "start `splice_from_pipe_to_writer`");
+        crate::trace!(ctx = ?self, "start `splice_pump`");
 
         let Some(size_need_to_be_written) = self
             .has_read
             .checked_sub(self.has_written)
             .and_then(NonZeroUsize::new)
         else {
-            if self.pipe.write_fd().is_none() {
+            if self.pipe.write_side_fd().is_none() {
                 crate::trace!(ctx = ?self, "no more data to write from pipe to writer");
 
-                self.pipe.close_read_fd();
+                self.pipe.set_splice_pump_finished();
             }
 
             // No data to write.
@@ -380,24 +368,20 @@ where
             self.has_read
         );
 
-        let Some(pipe_read_fd) = self.pipe.read_fd() else {
+        let Some(pipe_read_side_fd) = self.pipe.read_side_fd() else {
             // call splice after write done?
             return Ok(WRITE_DONE);
         };
 
-        crate::trace!(ctx = ?self, "need `splice_from_pipe_to_writer`");
+        crate::trace!(ctx = ?self, "need `splice_pump`");
 
         match splice(
-            pipe_read_fd,
+            pipe_read_side_fd,
             None,
             w.as_fd(),
             self.offset.off_out(),
             size_need_to_be_written.get(),
-            if BLOCKING {
-                SpliceFlags::empty()
-            } else {
-                SpliceFlags::NONBLOCK
-            },
+            flag,
         )
         .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
         {
@@ -406,10 +390,7 @@ where
                 self.need_flush = true;
                 self.has_written += has_written;
 
-                crate::trace!(
-                    ctx = ?self,
-                    "wrote {} bytes to writer", has_written
-                );
+                crate::trace!(ctx = ?self, "wrote {has_written} bytes to writer");
 
                 Ok(
                     NonZeroUsize::new(self.has_read.checked_sub(self.has_written).ok_or_else(
@@ -428,8 +409,8 @@ where
                 )
             }
             Err(e) => {
-                if !BLOCKING && e.kind() != io::ErrorKind::WouldBlock {
-                    self.pipe.close_read_fd();
+                if e.kind() != io::ErrorKind::WouldBlock {
+                    self.pipe.set_splice_pump_finished();
                 }
 
                 Err(e)
@@ -438,15 +419,8 @@ where
     }
 
     #[inline]
-    fn splice_from_pipe_to_writer_done(&self) -> bool {
-        self.pipe.read_fd().is_none()
-    }
-
-    #[inline]
     fn full_done(&self) -> bool {
-        (self.splice_from_reader_to_pipe_done())
-            && self.splice_from_pipe_to_writer_done()
-            && !self.need_flush
+        (self.pipe.splice_drain_finished()) && self.pipe.splice_pump_finished() && !self.need_flush
     }
 }
 
@@ -469,7 +443,8 @@ where
     /// [`thread`](std::thread)s, one for reading side `blocking_copy` and
     /// one for writing side `blocking_copy`.
     ///
-    /// For blocking mode copy, the `r` and `w` MUST NOT be non-blocking mode.
+    /// For blocking mode copy, the `r` and `w` MUST NOT be non-blocking mode,
+    /// or dead loop waiting for I/O ready will lead to high CPU consumption.
     pub fn blocking_copy(mut self, r: &mut R, w: &mut W) -> io::Result<TrafficResult> {
         let ret = self._blocking_copy(r, w);
 
@@ -486,9 +461,38 @@ where
                 self.need_flush = false;
             }
 
-            self.splice_from_reader_to_pipe::<BLOCKING_SPLICE>(r)?;
+            'splice_drain: loop {
+                match self.splice_drain(r, SpliceFlags::empty()) {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // `r` is not ready for reading from?
+                    }
+                    e @ Err(_) => {
+                        return e;
+                    }
+                    Ok(()) => {
+                        // Successfully read from `r` to pipe.
+                        break 'splice_drain;
+                    }
+                }
+            }
 
-            while self.splice_from_pipe_to_writer::<BLOCKING_SPLICE>(w)? {}
+            'splice_pump: loop {
+                match self.splice_pump(w, SpliceFlags::empty()) {
+                    Ok(true) => {
+                        // Not finished, keep polling.
+                    }
+                    Ok(false) => {
+                        // Pipe cleared.
+                        break 'splice_pump;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // `w` return EAGAIN?
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -525,8 +529,8 @@ where
     ///
     /// - The caller MUST NOT reuse the `SpliceIoCtx` after copy finished.
     /// - The traffic result is not returned, please use
-    ///   [`TrafficResult::new_from_io_result`] after copy done (successfully or
-    ///   not).
+    ///   [`TrafficResult::new_from_io_result`] after copy done to extract from
+    ///   the ctx.
     pub fn poll_copy(
         &mut self,
         cx: &mut Context<'_>,
@@ -536,19 +540,23 @@ where
         while !self.full_done() {
             crate::trace!(ctx = ?self, "loop `poll_copy`");
 
-            ready!(self.poll_splice_from_reader_to_pipe(cx, r.as_mut()))?;
+            ready!(self.poll_flush(cx, w.as_mut()))?;
+            ready!(self.poll_splice_drain(cx, r.as_mut()))?;
+            ready!(self.poll_splice_pump(cx, w.as_mut()))?;
+        }
 
-            if self.need_flush {
-                crate::trace!(ctx = ?self, "start `poll_flush`");
+        Poll::Ready(Ok(()))
+    }
 
-                // Try flushing when the reader has no progress to avoid deadlock
-                // when the reader depends on buffered writer.
-                ready!(w.as_mut().poll_flush(cx))?;
+    fn poll_flush(&mut self, cx: &mut Context<'_>, w: Pin<&mut W>) -> Poll<io::Result<()>> {
+        if self.need_flush {
+            crate::trace!(ctx = ?self, "start `poll_flush`");
 
-                self.need_flush = false;
-            }
+            // Try flushing when the reader has no progress to avoid deadlock
+            // when the reader depends on buffered writer.
+            ready!(w.poll_flush(cx))?;
 
-            ready!(self.poll_splice_from_pipe_to_writer(cx, w.as_mut()))?;
+            self.need_flush = false;
         }
 
         Poll::Ready(Ok(()))
@@ -561,28 +569,41 @@ where
         ),
         tracing::instrument(level = "TRACE", skip(self, cx, r), ret)
     )]
-    fn poll_splice_from_reader_to_pipe(
-        &mut self,
-        cx: &mut Context<'_>,
-        r: Pin<&mut R>,
-    ) -> Poll<io::Result<()>> {
-        crate::trace!(ctx = ?self, "start `poll_splice_from_reader_to_pipe`");
+    /// `poll_splice_drain` moves data from a socket (or file) to a pipe.
+    ///
+    /// Invariant: when entering `poll_splice_drain`, the pipe is empty. It is
+    /// either in its initial state, or `poll_splice_pump` has emptied it
+    /// previously.
+    ///
+    /// Given this, `poll_splice_drain` can reasonably assume that the pipe is
+    /// ready for writing, so if splice returns EAGAIN, it must be because
+    /// the socket is not ready for reading.
+    fn poll_splice_drain(&mut self, cx: &mut Context<'_>, r: Pin<&mut R>) -> Poll<io::Result<()>> {
+        crate::trace!(ctx = ?self, "start `poll_splice_drain`");
 
-        if self.splice_from_reader_to_pipe_done() || self.has_read != self.has_written {
+        if self.pipe.splice_drain_finished()
+            // has data in pipe, skip reading from `r` into pipe
+            || self.has_read != self.has_written
+        {
             return Poll::Ready(Ok(()));
         }
 
-        ready!(r.poll_read_ready(cx))?;
-        match r.try_io_read(|| self.splice_from_reader_to_pipe::<NONBLOCKING_SPLICE>(&r)) {
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                crate::trace!(ctx = ?self, "`poll_splice_from_reader_to_pipe` would block");
+        loop {
+            // In theory calling splice(2) with SPLICE_F_NONBLOCK could end up an infinite
+            // loop here, because it could return EAGAIN ceaselessly when the write
+            // end of the pipe is full, but this shouldn't be a concern here, since
+            // the pipe buffer must be sufficient (all buffered bytes will be written to
+            // writer after this).
 
-                // FIXME: tricky - alternative ways to wake up the task? epoll?
-                cx.waker().wake_by_ref();
+            ready!(r.poll_read_ready(cx))?;
 
-                Poll::Pending
+            match r.try_io_read(|| self.splice_drain(&r, SpliceFlags::NONBLOCK)) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // The `r` is not ready for reading from, busy loop, though
+                    // will return pending in next loop
+                }
+                r => break Poll::Ready(r),
             }
-            r => Poll::Ready(r),
         }
     }
 
@@ -593,23 +614,26 @@ where
         ),
         tracing::instrument(level = "TRACE", skip(self, cx, w), ret)
     )]
-    fn poll_splice_from_pipe_to_writer(
-        &mut self,
-        cx: &mut Context<'_>,
-        w: Pin<&mut W>,
-    ) -> Poll<io::Result<bool>> {
-        ready!(w.poll_write_ready(cx))?;
+    fn poll_splice_pump(&mut self, cx: &mut Context<'_>, w: Pin<&mut W>) -> Poll<io::Result<()>> {
+        crate::trace!(ctx = ?self, "start `poll_splice_pump`");
 
-        match w.try_io_write(|| self.splice_from_pipe_to_writer::<NONBLOCKING_SPLICE>(&w)) {
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                crate::trace!(ctx = ?self, "`splice_from_pipe_to_writer` would block");
+        loop {
+            ready!(w.poll_write_ready(cx))?;
 
-                // FIXME: tricky - alternative ways to wake up the task? epoll?
-                cx.waker().wake_by_ref();
-
-                Poll::Pending
+            match w.try_io_write(|| self.splice_pump(&w, SpliceFlags::NONBLOCK)) {
+                Ok(true) => {
+                    // Not finished, keep polling.
+                }
+                Ok(false) => {
+                    // Pipe cleared.
+                    break Poll::Ready(Ok(()));
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // The `w` is not ready for being written to, busy loop,
+                    // though will return pending in next loop
+                }
+                Err(e) => break Poll::Ready(Err(e)),
             }
-            r => Poll::Ready(r),
         }
     }
 }

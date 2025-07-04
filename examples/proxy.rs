@@ -4,9 +4,12 @@ use std::{env, io};
 
 use tokio::net::{TcpListener, TcpStream};
 
-#[tokio::main(flavor = "current_thread")]
+// #[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> io::Result<()> {
     println!("PID is {}", std::process::id());
+
+    // macro_toolset::init_tracing_simple!();
 
     tokio::select! {
         res = serve() => {

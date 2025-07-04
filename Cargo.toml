@@ -1,6 +1,6 @@
 [package]
 name = "tokio-splice2"
-version = "0.3.0-alpha.11"
+version = "0.3.0-alpha.12"
 edition = "2021"
 rust-version = "1.70.0"
 
@@ -19,9 +19,10 @@ tracing = { version = "0.1.41", optional = true }
 
 [dev-dependencies]
 human-format-next = "0.2.2"
+# macro-toolset = { version = "0.8.3", default-features = false }
 rand = "0.9.1"
-tokio = { version = "1.46.0", features = ["net", "macros", "rt", "signal", "io-util", "time"] }
-
+tokio = { version = "1.46.0", features = ["net", "macros", "rt", "rt-multi-thread", "signal", "io-util", "time"] }
+# tracing-subscriber = { version = "0.3.19", features = ["env-filter", "parking_lot"] }
 
 [features]
 default = ["feat-tracing"]
@@ -69,3 +70,14 @@ rust.unsafe_code = "warn"
 rust.missing_docs = "warn"
 rust.missing_debug_implementations = "warn"
 rust.unreachable_pub = "warn"
+
+# [profile.dev]
+# debug = "line-tables-only" # for faster rust-analyzer
+
+# [profile.release]
+# opt-level = 3
+# lto = true
+# codegen-units = 1
+# incremental = false
+# panic = "abort"
+# strip = true
