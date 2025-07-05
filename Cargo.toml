@@ -19,10 +19,10 @@ tracing = { version = "0.1.41", optional = true }
 
 [dev-dependencies]
 human-format-next = "0.2.2"
-# macro-toolset = { version = "0.8.3", default-features = false }
 rand = "0.9.1"
 tokio = { version = "1.46.0", features = ["net", "macros", "rt", "rt-multi-thread", "signal", "io-util", "time"] }
-# tracing-subscriber = { version = "0.3.19", features = ["env-filter", "parking_lot"] }
+tracing-appender = { version = "0.2.3", features = ["parking_lot"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "parking_lot"] }
 
 [features]
 default = ["feat-tracing"]

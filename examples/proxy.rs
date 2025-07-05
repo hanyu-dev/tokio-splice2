@@ -1,6 +1,7 @@
 //! Example: simple L4 proxy
 
-use std::{env, io};
+use std::env;
+use std::io::{self, stdout};
 
 use tokio::net::{TcpListener, TcpStream};
 
@@ -9,7 +10,23 @@ use tokio::net::{TcpListener, TcpStream};
 async fn main() -> io::Result<()> {
     println!("PID is {}", std::process::id());
 
-    // macro_toolset::init_tracing_simple!();
+    use tracing::level_filters::LevelFilter;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Layer};
+
+    let (w, _g) = tracing_appender::non_blocking(stdout());
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(w).with_filter(
+        EnvFilter::builder()
+            .with_default_directive(LevelFilter::DEBUG.into())
+            .from_env_lossy()
+            .add_directive("otel::tracing=trace".parse().unwrap())
+            .add_directive("h2=error".parse().unwrap())
+            .add_directive("tower=error".parse().unwrap())
+            .add_directive("hyper=error".parse().unwrap()),
+    );
+
+    tracing_subscriber::registry().with(fmt_layer).init();
 
     tokio::select! {
         res = serve() => {
