@@ -102,11 +102,26 @@ pub struct SpliceIoCtx<R, W> {
     /// Bytes that have been written to `W` from pipe read side.
     has_written: usize,
 
-    /// Whether need to flush `W` after writing.
+    /// Whether need to flush `W` after splicing.
     need_flush: bool,
+
+    /// Transfer state.
+    state: TransferState,
 
     r: PhantomData<R>,
     w: PhantomData<W>,
+}
+
+#[derive(Debug)]
+enum TransferState {
+    /// The I/O context is running and can accept more operations.
+    Running,
+
+    /// I/O Finished, flushing data to `W`.
+    ShuttingDown,
+
+    /// I/O context is done and cannot accept more operations.
+    Finished,
 }
 
 impl<R, W> fmt::Debug for SpliceIoCtx<R, W> {
@@ -118,6 +133,7 @@ impl<R, W> fmt::Debug for SpliceIoCtx<R, W> {
             .field("has_read", &self.has_read)
             .field("has_written", &self.has_written)
             .field("need_flush", &self.need_flush)
+            .field("state", &self.state)
             .finish()
     }
 }
@@ -132,6 +148,7 @@ impl<R, W> SpliceIoCtx<R, W> {
             has_read: 0,
             has_written: 0,
             need_flush: false,
+            state: TransferState::Running,
             r: PhantomData,
             w: PhantomData,
         })
@@ -539,19 +556,37 @@ where
         mut r: Pin<&mut R>,
         mut w: Pin<&mut W>,
     ) -> Poll<io::Result<()>> {
-        while !self.full_done() {
-            crate::trace!(ctx = ?self, "loop `poll_copy`");
+        loop {
+            match self.state {
+                TransferState::Running => {
+                    while !self.full_done() {
+                        crate::trace!(ctx = ?self, "loop `poll_copy`");
 
-            ready!(self.poll_flush(cx, w.as_mut()))?;
-            ready!(self.poll_splice_drain(cx, r.as_mut()))?;
-            ready!(self.poll_splice_pump(cx, w.as_mut()))?;
+                        let _ = self.poll_flush(cx, w.as_mut(), false)?;
+                        ready!(self.poll_splice_drain(cx, r.as_mut()))?;
+                        ready!(self.poll_splice_pump(cx, w.as_mut()))?;
+                    }
+
+                    self.state = TransferState::ShuttingDown;
+                }
+                TransferState::ShuttingDown => {
+                    // ! Must shutdown, or Tokio will hang forever.
+                    ready!(w.as_mut().poll_shutdown(cx))?;
+
+                    self.state = TransferState::Finished;
+                }
+                TransferState::Finished => break Poll::Ready(Ok(())),
+            }
         }
-
-        Poll::Ready(Ok(()))
     }
 
-    fn poll_flush(&mut self, cx: &mut Context<'_>, w: Pin<&mut W>) -> Poll<io::Result<()>> {
-        if self.need_flush {
+    fn poll_flush(
+        &mut self,
+        cx: &mut Context<'_>,
+        w: Pin<&mut W>,
+        force: bool,
+    ) -> Poll<io::Result<()>> {
+        if force || self.need_flush {
             crate::trace!(ctx = ?self, "start `poll_flush`");
 
             // Try flushing when the reader has no progress to avoid deadlock
@@ -689,7 +724,7 @@ where
         ) {
             (r @ Poll::Ready(Ok(_)), Poll::Ready(Ok(_))) => r,
             (e @ Poll::Ready(Err(_)), _) | (_, e @ Poll::Ready(Err(_))) => e,
-            _ => {
+            (Poll::Pending, _) | (_, Poll::Pending) => {
                 crate::trace!("`poll_copy_bidirectional` would block");
                 Poll::Pending
             }
