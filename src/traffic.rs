@@ -27,8 +27,24 @@ impl TrafficResult {
         match error {
             Some(err) => match err.kind() {
                 io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset => Ok(Self {
-                    tx: ctx_a_to_b.has_read().max(ctx_a_to_b.has_written()),
-                    rx: ctx_b_to_a.map_or(0, |ctx| ctx.has_read().max(ctx.has_written())),
+                    tx: {
+                        crate::warning!(
+                            ctx = ?ctx_a_to_b,
+                            "Broken pipe or connection reset, --> has_read {}. has_written {}",
+                            ctx_a_to_b.has_read(),
+                            ctx_a_to_b.has_written()
+                        );
+                        ctx_a_to_b.has_read().max(ctx_a_to_b.has_written())
+                    },
+                    rx: ctx_b_to_a.map_or(0, |ctx| {
+                        crate::warning!(
+                            ctx = ?ctx,
+                            "Broken pipe or connection reset, <-- has_read {}. has_written {}",
+                            ctx.has_read(),
+                            ctx.has_written());
+
+                        ctx.has_read().max(ctx.has_written())
+                    }),
                     error: None,
                 }),
                 _ => Err(err),

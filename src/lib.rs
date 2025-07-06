@@ -168,5 +168,21 @@ macro_rules! info {
     }};
 }
 
+// Avoid name conflicts with `warn` in the standard library.
+macro_rules! warning {
+    ($($tt:tt)*) => {{
+        #[cfg(feature = "feat-tracing")]
+        tracing::warn!($($tt)*);
+    }};
+}
+
 #[allow(unused)]
-pub(crate) use {debug, info, trace};
+macro_rules! error {
+    ($($tt:tt)*) => {{
+        #[cfg(feature = "feat-tracing")]
+        tracing::error!($($tt)*);
+    }};
+}
+
+#[allow(unused)]
+pub(crate) use {debug, error, info, trace, warning};
