@@ -254,7 +254,7 @@ where
             feature = "feat-tracing-trace",
             all(debug_assertions, feature = "feat-tracing")
         ),
-        tracing::instrument(level = "TRACE", skip_all, err)
+        tracing::instrument(level = "TRACE", skip_all, ret)
     )]
     /// Splicing data from `R` to pipe using `splice(2)`
     ///
@@ -312,6 +312,7 @@ where
                 crate::trace!(ctx = ?self, "read {has_read} bytes from reader");
 
                 self.has_read += has_read;
+                self.size_to_splice -= has_read;
 
                 Ok(())
             }
@@ -346,6 +347,12 @@ where
 
         crate::trace!(ctx = ?self, "start `splice_pump`");
 
+        let Some(pipe_read_side_fd) = self.pipe.read_side_fd() else {
+            crate::debug!(ctx = ?self, "pipe read side fd is closed");
+            // call splice after write done?
+            return Ok(WRITE_DONE);
+        };
+
         let Some(size_need_to_be_written) = self
             .has_read
             .checked_sub(self.has_written)
@@ -367,11 +374,6 @@ where
             self.has_written,
             self.has_read
         );
-
-        let Some(pipe_read_side_fd) = self.pipe.read_side_fd() else {
-            // call splice after write done?
-            return Ok(WRITE_DONE);
-        };
 
         crate::trace!(ctx = ?self, "need `splice_pump`");
 
