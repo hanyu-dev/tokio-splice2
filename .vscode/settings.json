@@ -1,6 +1,7 @@
 {
     "rust-analyzer.cargo.features": [
         "feat-tracing",
-        "feat-nightly"
+        "feat-nightly",
+        "feat-rate-limit"
     ]
 }

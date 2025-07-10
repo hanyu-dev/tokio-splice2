@@ -1,6 +1,6 @@
 [package]
 name = "tokio-splice2"
-version = "0.3.0-rc.13"
+version = "0.3.0-rc.14"
 edition = "2021"
 rust-version = "1.70.0"
 
@@ -12,7 +12,13 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/hanyu-dev/tokio-splice2"
 
+[package.metadata.docs.rs]
+features = ["feat-rate-limit"]
+targets = ["x86_64-unknown-linux-gnu", "i686-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
 [dependencies]
+crossbeam-utils = "0.8.21"
+pin-project = "1.1.10"
 rustix = { version = "1.0.0", features = ["pipe"] }
 tokio = { version = "1.46.0", features = ["fs", "net"] }
 tracing = { version = "0.1.41", optional = true }
@@ -29,11 +35,18 @@ default = ["feat-tracing"]
 
 # Enable crate `tracing` support
 feat-tracing = ["dep:tracing"]
+
 # Enable crate `tracing` support and enable Level::TRACE log in release profile build.
 feat-tracing-trace = ["feat-tracing"]
 
+# Enable rate limiting support
+feat-rate-limit = ["tokio/time"]
+
 # Enable nightly Rust feature
 feat-nightly = []
+
+# # Cache `Pipe`, avoid creating new pipe for each ctx. 
+# feat-pipe-pool = ["dep:parking_lot", "tokio/sync"]
 
 [lints]
 clippy.allow_attributes_without_reason = "warn"
@@ -74,10 +87,10 @@ rust.unreachable_pub = "warn"
 # [profile.dev]
 # debug = "line-tables-only" # for faster rust-analyzer
 
-# [profile.release]
-# opt-level = 3
-# lto = true
-# codegen-units = 1
-# incremental = false
-# panic = "abort"
-# strip = true
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+incremental = false
+panic = "abort"
+strip = true

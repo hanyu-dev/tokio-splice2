@@ -51,100 +51,100 @@
 #![cfg_attr(feature = "feat-nightly", feature(cold_path))]
 #![cfg_attr(debug_assertions, allow(clippy::unreachable))]
 
+pub mod context;
+pub mod io;
 pub mod pipe;
-mod splice;
+#[cfg(feature = "feat-rate-limit")]
+pub mod rate;
 pub mod traffic;
+pub mod utils;
 
-use std::io;
-use std::pin::Pin;
+#[cfg(not(feature = "feat-rate-limit"))]
+pub mod rate {
+    //! TCP rate limiter implementation.
+    //!
+    //! This module provides a no-op implementation of the rate limiter if the
+    //! `feat-rate-limit` feature is not enabled.
 
-pub use splice::{AsyncReadFd, AsyncWriteFd, IsFile, IsNotFile, ReadFd, SpliceIoCtx, WriteFd};
+    #[allow(unused)]
+    pub(crate) const RATE_LIMITER_ENABLED: bool = true;
+    #[allow(unused)]
+    pub(crate) const RATE_LIMITER_DISABLED: bool = false;
+}
+
+pub use context::SpliceIoCtx;
+pub use io::{
+    AsyncReadFd, AsyncWriteFd, IsFile, IsNotFile, ReadFd, SpliceBidiIo, SpliceIo, WriteFd,
+};
+#[cfg(feature = "feat-rate-limit")]
+pub use rate::RateLimit;
 
 #[inline]
-/// Copy data from `r` to `w` using `splice(2)`.
+/// Copies data from `r` to `w` using `splice(2)`.
 ///
-/// This is a convenience function that uses [`SpliceIoCtx::copy`] with default
-/// ctx. See [`SpliceIoCtx::copy`] for more details.
-///
-/// Notice: see the [module-level documentation](crate) for known limitations.
-pub async fn copy<R, W>(r: &mut R, w: &mut W) -> io::Result<traffic::TrafficResult>
+/// See [`SpliceIoCtx::prepare`] and [`SpliceIo::execute`] for more details; see
+/// the [crate-level documentation](crate) for known limitations.
+pub async fn copy<R, W>(r: &mut R, w: &mut W) -> std::io::Result<traffic::TrafficResult>
 where
-    R: splice::AsyncReadFd + IsNotFile + Unpin,
-    W: splice::AsyncWriteFd + IsNotFile + Unpin,
+    R: io::AsyncReadFd + IsNotFile + Unpin,
+    W: io::AsyncWriteFd + IsNotFile + Unpin,
 {
-    SpliceIoCtx::prepare()?.copy(Pin::new(r), Pin::new(w)).await
+    Ok(context::SpliceIoCtx::prepare()?
+        .into_io()
+        .execute(r, w)
+        .await)
 }
 
 #[inline]
-/// Copy data from file `r` to `w` using `splice(2)`.
+/// Copies data from file `r` to `w` using `splice(2)`.
 ///
-/// Unlike [`copy`], this function is specifically designed for copying from a
-/// file.
-///
-/// Notice: see the [module-level documentation](crate) for known limitations.
-pub async fn copy_from_file<R, W>(
+/// See [`SpliceIoCtx::prepare_reading_file`] for more details; see the
+/// [crate-level documentation](crate) for known limitations.
+pub async fn sendfile<R, W>(
     r: &mut R,
     w: &mut W,
     f_len: u64,
     f_offset_start: Option<u64>,
     f_offset_end: Option<u64>,
-) -> io::Result<traffic::TrafficResult>
+) -> std::io::Result<traffic::TrafficResult>
 where
-    R: splice::AsyncReadFd + IsFile + Unpin,
-    W: splice::AsyncWriteFd + IsNotFile + Unpin,
+    R: io::AsyncReadFd + IsFile + Unpin,
+    W: io::AsyncWriteFd + IsNotFile + Unpin,
 {
-    SpliceIoCtx::prepare_reading_file(f_len, f_offset_start, f_offset_end)?
-        .copy(Pin::new(r), Pin::new(w))
-        .await
+    Ok(
+        context::SpliceIoCtx::prepare_reading_file(f_len, f_offset_start, f_offset_end)?
+            .into_io()
+            .execute(r, w)
+            .await,
+    )
 }
 
 #[inline]
-/// Blocking version of [`copy`].
-pub fn blocking_copy<R, W>(r: &mut R, w: &mut W) -> io::Result<traffic::TrafficResult>
-where
-    R: splice::ReadFd + IsNotFile,
-    W: splice::WriteFd + IsNotFile,
-{
-    SpliceIoCtx::prepare()?.blocking_copy(r, w)
-}
-
-#[inline]
-/// Blocking version of [`copy_from_file`].
-pub fn blocking_copy_from_file<R, W>(
-    r: &mut R,
-    w: &mut W,
-    f_len: u64,
-    f_offset_start: Option<u64>,
-    f_offset_end: Option<u64>,
-) -> io::Result<traffic::TrafficResult>
-where
-    R: splice::ReadFd + IsFile,
-    W: splice::WriteFd + IsNotFile,
-{
-    SpliceIoCtx::prepare_reading_file(f_len, f_offset_start, f_offset_end)?.blocking_copy(r, w)
-}
-
-#[inline]
-/// Copies data in both directions between `a` and `b`.
+/// Copies data in both directions between `sl` and `sr`.
 ///
 /// This function returns a future that will read from both streams, writing any
 /// data read to the opposing stream. This happens in both directions
 /// concurrently.
 ///
-/// Notice: see the [module-level documentation](crate) for known limitations.
-pub async fn copy_bidirectional<A, B>(a: &mut A, b: &mut B) -> io::Result<traffic::TrafficResult>
+/// See [`SpliceIoCtx::prepare`] and [`SpliceBidiIo::execute`] for more details;
+/// see the [crate-level documentation](crate) for known limitations.
+pub async fn copy_bidirectional<A, B>(
+    sl: &mut A,
+    sr: &mut B,
+) -> std::io::Result<traffic::TrafficResult>
 where
-    A: splice::AsyncReadFd + splice::AsyncWriteFd + IsNotFile + Unpin,
-    B: splice::AsyncReadFd + splice::AsyncWriteFd + IsNotFile + Unpin,
+    A: io::AsyncReadFd + io::AsyncWriteFd + IsNotFile + Unpin,
+    B: io::AsyncReadFd + io::AsyncWriteFd + IsNotFile + Unpin,
 {
-    SpliceIoCtx::copy_bidirectional(
-        SpliceIoCtx::prepare()?,
-        SpliceIoCtx::prepare()?,
-        Pin::new(a),
-        Pin::new(b),
-    )
-    .await
+    Ok(io::SpliceBidiIo {
+        io_sl2sr: context::SpliceIoCtx::prepare()?.into_io(),
+        io_sr2sl: context::SpliceIoCtx::prepare()?.into_io(),
+    }
+    .execute(sl, sr)
+    .await)
 }
+
+// === Tracing macros for logging ===
 
 macro_rules! trace {
     ($($tt:tt)*) => {{
@@ -161,6 +161,7 @@ macro_rules! debug {
     }};
 }
 
+#[allow(unused)]
 macro_rules! info {
     ($($tt:tt)*) => {{
         #[cfg(feature = "feat-tracing")]
@@ -168,6 +169,7 @@ macro_rules! info {
     }};
 }
 
+#[allow(unused)]
 // Avoid name conflicts with `warn` in the standard library.
 macro_rules! warning {
     ($($tt:tt)*) => {{
@@ -184,5 +186,19 @@ macro_rules! error {
     }};
 }
 
+macro_rules! enter_tracing_span {
+    ($($tt:tt)*) => {
+        #[cfg(any(
+            feature = "feat-tracing-trace",
+            all(debug_assertions, feature = "feat-tracing")
+        ))]
+        let _span = tracing::span!(
+            tracing::Level::TRACE,
+            $($tt)*
+        )
+        .entered();
+    };
+}
+
 #[allow(unused)]
-pub(crate) use {debug, error, info, trace, warning};
+pub(crate) use {debug, enter_tracing_span, error, info, trace, warning};

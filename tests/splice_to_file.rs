@@ -1,6 +1,5 @@
 //! Uni-test: Splice from file
 
-use core::pin::Pin;
 use std::io;
 use std::sync::LazyLock;
 
@@ -9,7 +8,48 @@ use tokio::fs as async_fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream as AsyncTcpStream;
 
-const FILE_NAME: &str = "/tmp/test_file_splice_to_file.txt";
+#[tokio::test]
+async fn test_splice_to_file_no_offset() -> io::Result<()> {
+    let config = SpliceToFileTestConfig::new(None, None, false, "test_splice_to_file_no_offset");
+    run_splice_to_file_test(config).await
+}
+
+#[tokio::test]
+async fn test_splice_to_file_with_offset_start_not_preserve_content_out_of_range() -> io::Result<()>
+{
+    let config = SpliceToFileTestConfig::new(
+        Some(6),
+        None,
+        false,
+        "test_splice_to_file_with_offset_start_not_preserve_content_out_of_range",
+    );
+    run_splice_to_file_test(config).await
+}
+
+#[tokio::test]
+async fn test_splice_to_file_with_offset_end_not_preserve_content_out_of_range() -> io::Result<()> {
+    let config = SpliceToFileTestConfig::new(
+        None,
+        Some(6),
+        false,
+        "test_splice_to_file_with_offset_end_not_preserve_content_out_of_range",
+    );
+    run_splice_to_file_test(config).await
+}
+
+#[tokio::test]
+async fn test_splice_to_file_with_offset_both_not_preserve_content_out_of_range() -> io::Result<()>
+{
+    let config = SpliceToFileTestConfig::new(
+        Some(4),
+        Some(9),
+        false,
+        "test_splice_to_file_with_offset_both_not_preserve_content_out_of_range",
+    );
+    run_splice_to_file_test(config).await
+}
+
+// =========
 
 const FILE_CONTENT: [u8; 12] = *b"Hello, File!";
 
@@ -20,14 +60,14 @@ static NEW_FILE_CONTENT: LazyLock<[u8; 128]> = LazyLock::new(|| {
     content
 });
 
-async fn test_file() -> io::Result<async_fs::File> {
+async fn test_file(file_name: &str) -> io::Result<async_fs::File> {
     let mut file = async_fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(true)
         .append(false)
-        .open(FILE_NAME)
+        .open(&format!("/tmp/{}.txt", file_name))
         .await?;
 
     file.write_all(&FILE_CONTENT).await?;
@@ -41,8 +81,9 @@ async fn splice_to_file(
     mut f_offset_start: Option<u64>,
     mut f_offset_end: Option<u64>,
     preserve_content_out_of_range: bool,
+    file_name: &str,
 ) -> io::Result<()> {
-    let mut w = test_file().await?;
+    let mut w = test_file(file_name).await?;
     let mut w_len = w.metadata().await?.len();
     let original_f_offset_start = f_offset_start.unwrap_or(0);
 
@@ -91,8 +132,9 @@ async fn splice_to_file(
     };
 
     tokio_splice2::SpliceIoCtx::prepare_writing_file(w_len, f_offset_start, f_offset_end)?
-        .copy(Pin::new(r), Pin::new(&mut w))
-        .await?;
+        .into_io()
+        .execute(r, &mut w)
+        .await;
 
     let mut buf = vec![0; w_len as usize];
     // println!("w_len: {w_len}");
@@ -100,7 +142,7 @@ async fn splice_to_file(
     // Do no reuse the file handle, since its offset is not at the start of file.
     async_fs::OpenOptions::new()
         .read(true)
-        .open(FILE_NAME)
+        .open(&format!("/tmp/{}.txt", file_name))
         .await?
         .read_exact(&mut buf)
         .await?;
@@ -114,106 +156,43 @@ async fn splice_to_file(
     Ok(())
 }
 
-#[tokio::test]
-async fn test_splice_to_file_no_offset() -> io::Result<()> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let listen_at = listener.local_addr()?;
-
-    let handle = tokio::spawn(async move {
-        if let Ok((mut stream, _)) = listener.accept().await {
-            // ! We assume we will receive enough data, or the file will be partially
-            // written!
-            splice_to_file(&mut stream, None, None, false)
-                .await
-                .unwrap();
-        }
-    });
-
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let mut client = AsyncTcpStream::connect(listen_at).await?;
-
-    let client_handle = tokio::spawn(async move {
-        client
-            .write_all(&NEW_FILE_CONTENT[..FILE_CONTENT.len()])
-            .await
-            .unwrap();
-    });
-
-    tokio::try_join!(handle, client_handle)?;
-
-    Ok(())
+/// Test configuration for splice_to_file tests
+struct SpliceToFileTestConfig {
+    f_offset_start: Option<u64>,
+    f_offset_end: Option<u64>,
+    preserve_content_out_of_range: bool,
+    test_name: &'static str,
 }
 
-#[tokio::test]
-async fn test_splice_to_file_with_offset_start_not_preserve_content_out_of_range() -> io::Result<()>
-{
-    const TEST_OFFSET: u64 = 6;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let listen_at = listener.local_addr()?;
-
-    let handle = tokio::spawn(async move {
-        if let Ok((mut stream, _)) = listener.accept().await {
-            splice_to_file(&mut stream, Some(TEST_OFFSET), None, false)
-                .await
-                .unwrap();
+impl SpliceToFileTestConfig {
+    fn new(
+        f_offset_start: Option<u64>,
+        f_offset_end: Option<u64>,
+        preserve_content_out_of_range: bool,
+        test_name: &'static str,
+    ) -> Self {
+        Self {
+            f_offset_start,
+            f_offset_end,
+            preserve_content_out_of_range,
+            test_name,
         }
-    });
+    }
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    fn data_to_write(&self) -> &[u8] {
+        let start = self.f_offset_start.unwrap_or(0) as usize;
+        let end = self.f_offset_end.unwrap_or(FILE_CONTENT.len() as u64) as usize;
 
-    let mut client = AsyncTcpStream::connect(listen_at).await?;
-
-    let client_handle = tokio::spawn(async move {
-        client
-            .write_all(&NEW_FILE_CONTENT[TEST_OFFSET as usize..])
-            .await
-            .unwrap();
-    });
-
-    tokio::try_join!(handle, client_handle)?;
-
-    Ok(())
+        if self.preserve_content_out_of_range {
+            &NEW_FILE_CONTENT[start..]
+        } else {
+            &NEW_FILE_CONTENT[start..end]
+        }
+    }
 }
 
-#[tokio::test]
-async fn test_splice_to_file_with_offset_end_not_preserve_content_out_of_range() -> io::Result<()> {
-    const TEST_OFFSET: u64 = 6;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let listen_at = listener.local_addr()?;
-
-    let handle = tokio::spawn(async move {
-        if let Ok((mut stream, _)) = listener.accept().await {
-            splice_to_file(&mut stream, None, Some(TEST_OFFSET), false)
-                .await
-                .unwrap();
-        }
-    });
-
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let mut client = AsyncTcpStream::connect(listen_at).await?;
-
-    let client_handle = tokio::spawn(async move {
-        client
-            .write_all(&NEW_FILE_CONTENT[..TEST_OFFSET as usize])
-            .await
-            .unwrap();
-    });
-
-    tokio::try_join!(handle, client_handle)?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_splice_to_file_with_offset_both_not_preserve_content_out_of_range() -> io::Result<()>
-{
-    const TEST_OFFSET_FROM: u64 = 4;
-    const TEST_OFFSET_TO: u64 = 9;
-
+/// Common test runner for splice_to_file tests
+async fn run_splice_to_file_test(config: SpliceToFileTestConfig) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let listen_at = listener.local_addr()?;
 
@@ -221,9 +200,10 @@ async fn test_splice_to_file_with_offset_both_not_preserve_content_out_of_range(
         if let Ok((mut stream, _)) = listener.accept().await {
             splice_to_file(
                 &mut stream,
-                Some(TEST_OFFSET_FROM),
-                Some(TEST_OFFSET_TO),
-                false,
+                config.f_offset_start,
+                config.f_offset_end,
+                config.preserve_content_out_of_range,
+                config.test_name,
             )
             .await
             .unwrap();
@@ -233,12 +213,10 @@ async fn test_splice_to_file_with_offset_both_not_preserve_content_out_of_range(
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let mut client = AsyncTcpStream::connect(listen_at).await?;
+    let data_to_write = config.data_to_write().to_vec();
 
     let client_handle = tokio::spawn(async move {
-        client
-            .write_all(&NEW_FILE_CONTENT[TEST_OFFSET_FROM as usize..TEST_OFFSET_TO as usize])
-            .await
-            .unwrap();
+        client.write_all(&data_to_write).await.unwrap();
     });
 
     tokio::try_join!(handle, client_handle)?;

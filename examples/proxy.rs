@@ -1,9 +1,11 @@
 //! Example: simple L4 proxy
 
-use std::env;
-use std::io::{self, stdout};
+use std::num::NonZeroU64;
+use std::{env, io};
 
 use tokio::net::{TcpListener, TcpStream};
+#[cfg(feature = "feat-rate-limit")]
+use tokio_splice2::rate::RateLimit;
 
 // #[tokio::main(flavor = "current_thread")]
 #[tokio::main]
@@ -15,7 +17,7 @@ async fn main() -> io::Result<()> {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{EnvFilter, Layer};
 
-    let (w, _g) = tracing_appender::non_blocking(stdout());
+    let (w, _g) = tracing_appender::non_blocking(io::stdout());
     let fmt_layer = tracing_subscriber::fmt::layer().with_writer(w).with_filter(
         EnvFilter::builder()
             .with_default_directive(LevelFilter::DEBUG.into())
@@ -26,7 +28,10 @@ async fn main() -> io::Result<()> {
             .add_directive("hyper=error".parse().unwrap()),
     );
 
-    tracing_subscriber::registry().with(fmt_layer).init();
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        // .with(console_subscriber::spawn())
+        .init();
 
     tokio::select! {
         res = serve() => {
@@ -81,33 +86,90 @@ async fn forwarding(mut stream1: TcpStream) -> io::Result<()> {
         }
     };
 
+    let instant = std::time::Instant::now();
+
     // let result = tokio_splice::zero_copy_bidirectional(&mut stream1, &mut
     // stream2).await;
-    let instant = std::time::Instant::now();
-    let result = tokio_splice2::copy_bidirectional(&mut stream1, &mut stream2).await;
+
+    let limit = env::var("LIMIT")
+        .ok()
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(1u64 * 1000 * 1000);
+
+    println!(
+        "Rate limit is set to {}/s",
+        human_format_next::Formatter::SI
+            .with_custom_unit("B")
+            .format(limit),
+    );
+
+    let limit = RateLimit::new(NonZeroU64::new(limit).unwrap());
+
+    // let rate_limiter_clone = rate_limiter.clone();
+    // tokio::spawn(async move {
+    //     loop {
+    //         tokio::time::sleep(Duration::from_secs(10)).await;
+    //         rate_limiter_clone.set_total(NonZeroU64::new(100 * 1024).unwrap());
+    //         println!("Rate limiter updated to 100 KiB/s");
+
+    //         tokio::time::sleep(Duration::from_secs(10)).await;
+    //         rate_limiter_clone.set_total(NonZeroU64::new(8 * 1024).unwrap());
+    //         println!("Rate limiter updated to 8 KiB/s");
+
+    //         tokio::time::sleep(Duration::from_secs(10)).await;
+    //         rate_limiter_clone.set_total(NonZeroU64::new(8 * 1024 *
+    // 1024).unwrap());         println!("Rate limiter updated to 8 MiB/s");
+
+    //         tokio::time::sleep(Duration::from_secs(10)).await;
+    //         rate_limiter_clone.set_total(NonZeroU64::new(300 * 1024).unwrap());
+    //         println!("Rate limiter updated to 300 KiB/s");
+
+    //         // tokio::time::sleep(Duration::from_secs(10)).await;
+    //         // rate_limiter_clone.set_total(NonZeroU64::new(16 * 1000 *
+    //         // 1000).unwrap()); println!("Rate limiter updated to 16
+    //         // MB/s");
+
+    //         // tokio::time::sleep(Duration::from_secs(10)).await;
+
+    //         // rate_limiter_clone.set_total(NonZeroU64::new(500 *
+    //         // 1000).unwrap()); println!("Rate limiter updated to
+    //         // 500 KB/s");
+
+    //         // tokio::time::sleep(Duration::from_secs(10)).await;
+    //         // rate_limiter_clone.set_disable();
+    //         // println!("Rate limiter updated to unlimited");
+    //     }
+    // });
+
+    let io_sl2sr = tokio_splice2::context::SpliceIoCtx::prepare()?
+        .into_io()
+        .with_rate_limit(limit.clone());
+    let io_sr2sl = tokio_splice2::context::SpliceIoCtx::prepare()?
+        .into_io()
+        .with_rate_limit(limit);
+
+    let traffic = tokio_splice2::io::SpliceBidiIo { io_sl2sr, io_sr2sl }
+        .execute(&mut stream1, &mut stream2)
+        .await;
     // let result = realm_io::bidi_zero_copy(&mut stream1, &mut stream2).await;
 
-    match result {
-        Ok(traffic) => {
-            let total = traffic.sum();
-            let cost = instant.elapsed();
-            println!(
-                "Forwarded traffic: {traffic:?}, total: {}, time: {:.2}s, avg: {}",
-                human_format_next::Formatter::BINARY
-                    .with_custom_unit("B")
-                    .with_decimals::<4>()
-                    .format(total as f64),
-                cost.as_secs_f64(),
-                human_format_next::Formatter::BINARY
-                    .with_custom_unit("B/s")
-                    .with_decimals::<4>()
-                    .format(total as f64 / cost.as_secs_f64())
-            );
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Failed to copy data: {e}");
-            Err(e)
-        }
-    }
+    let total = traffic.sum();
+    // let total = traffic.0 + traffic.1;
+    let cost = instant.elapsed();
+    println!(
+        "Forwarded traffic: total: {}, time: {:.2}s, avg: {:.4} -> {}, error: {:?}",
+        human_format_next::Formatter::SI
+            .with_custom_unit("B")
+            .with_decimals::<4>()
+            .format(total as f64),
+        cost.as_secs_f64(),
+        total as f64 / cost.as_secs_f64(),
+        human_format_next::Formatter::SI
+            .with_custom_unit("B/s")
+            .with_decimals::<4>()
+            .format((total as f64 / cost.as_secs_f64()) as u64),
+        traffic.error
+    );
+
+    Ok(())
 }
