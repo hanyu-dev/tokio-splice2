@@ -301,7 +301,7 @@ impl<const ENABLED: bool> RateLimiter<ENABLED> {
                     .max(TOKIO_TIMER_MIN_DUR), // or Tokio may sleep forever
                 };
             } else {
-                // 
+                //
             }
         }
 

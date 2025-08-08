@@ -1,9 +1,7 @@
 //! `splice(2)` I/O implementation.
 
-use core::ops;
 use std::fs::File;
 use std::future::poll_fn;
-use std::io;
 use std::marker::PhantomData;
 #[cfg(not(feature = "feat-rate-limit"))]
 use std::marker::PhantomPinned;
@@ -12,6 +10,7 @@ use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::pin::{pin, Pin};
 use std::task::{ready, Context, Poll};
+use std::{io, ops};
 
 use crossbeam_utils::CachePadded;
 use tokio::fs::File as AsyncFile;
