@@ -11,12 +11,44 @@ env:
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
-
+    name: Build - ${{ matrix.platform.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        platform:
+          # Tier 1
+          - target: aarch64-unknown-linux-gnu
+          - target: i686-unknown-linux-gnu
+          - target: x86_64-unknown-linux-gnu
+          # Tier 2 with host tools
+          - target: arm-unknown-linux-gnueabi
+          - target: arm-unknown-linux-gnueabihf
+          - target: armv7-unknown-linux-gnueabihf
+          - target: loongarch64-unknown-linux-gnu
+            toolchain: 1.71.0
+          - target: riscv64gc-unknown-linux-gnu
+          - target: s390x-unknown-linux-gnu
+          # Tier 2 without host tools
+          - target: armv7-unknown-linux-gnueabi
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose --features feat-rate-limit
-    - name: Run tests
-      run: cargo test --verbose --features feat-rate-limit
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          toolchain: ${{ matrix.platform.toolchain || '1.70.0' }}
+          command: build
+          target: ${{ matrix.platform.target }}
+          args: "--release --verbose --features feat-rate-limit"
+
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.70.0
+      - name: Run tests
+        run: cargo test --release --verbose --features feat-rate-limit
