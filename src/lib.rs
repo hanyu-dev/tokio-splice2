@@ -73,9 +73,7 @@ pub mod rate {
 }
 
 pub use context::SpliceIoCtx;
-pub use io::{
-    AsyncReadFd, AsyncWriteFd, IsFile, IsNotFile, ReadFd, SpliceBidiIo, SpliceIo, WriteFd,
-};
+pub use io::{AsyncReadFd, AsyncWriteFd, IsFile, IsNotFile, SpliceBidiIo, SpliceIo};
 #[cfg(feature = "feat-rate-limit")]
 pub use rate::RateLimit;
 

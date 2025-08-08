@@ -1,21 +1,18 @@
 //! `splice(2)` I/O implementation.
 
-use std::fs::File;
 use std::future::poll_fn;
 use std::marker::PhantomData;
 #[cfg(not(feature = "feat-rate-limit"))]
 use std::marker::PhantomPinned;
-use std::net::TcpStream;
 use std::os::fd::AsFd;
-use std::os::unix::net::UnixStream;
 use std::pin::{pin, Pin};
 use std::task::{ready, Context, Poll};
 use std::{io, ops};
 
 use crossbeam_utils::CachePadded;
-use tokio::fs::File as AsyncFile;
+use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncWrite, Interest};
-use tokio::net::{TcpStream as AsyncTcpStream, UnixStream as AsyncUnixStream};
+use tokio::net::{TcpStream, UnixStream};
 #[cfg(feature = "feat-rate-limit")]
 use tokio::time::Sleep;
 
@@ -513,35 +510,5 @@ macro_rules! impl_async_fd {
     };
 }
 
-impl_async_fd!(AsyncTcpStream, AsyncUnixStream);
-impl_async_fd!(FILE: AsyncFile);
-
-/// Trait for readable file descriptors.
-pub trait ReadFd: io::Read + AsFd {}
-
-impl<T: ReadFd> ReadFd for &mut T {}
-
-/// Trait for writable file descriptors.
-pub trait WriteFd: io::Write + AsFd {}
-
-impl<T: WriteFd> WriteFd for &mut T {}
-
-macro_rules! impl_fd {
-    ($($ty:ty),+) => {
-        $(
-            impl ReadFd for $ty {}
-            impl WriteFd for $ty {}
-            impl IsNotFile for $ty {}
-        )+
-    };
-    (FILE: $($ty:ty),+) => {
-        $(
-            impl ReadFd for $ty {}
-            impl WriteFd for $ty {}
-            impl IsFile for $ty {}
-        )+
-    };
-}
-
-impl_fd!(TcpStream, UnixStream);
-impl_fd!(FILE: File);
+impl_async_fd!(TcpStream, UnixStream);
+impl_async_fd!(FILE: File);
