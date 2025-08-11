@@ -29,8 +29,8 @@ pub(crate) const RATE_LIMITER_DISABLED: bool = false;
 ///
 /// - (WIP) Not so that accurate, as Tokio's timer resolution is limited to 1ms.
 pub struct RateLimit {
-    total: CachePadded<Arc<AtomicU64>>,
-    shared_by: CachePadded<Arc<AtomicU16>>,
+    total: Arc<AtomicU64>,
+    shared_by: Arc<AtomicU16>,
 }
 
 impl RateLimit {
@@ -40,8 +40,8 @@ impl RateLimit {
     #[must_use]
     pub fn new(limit: NonZeroU64) -> Self {
         Self {
-            total: CachePadded::new(Arc::new(AtomicU64::new(limit.get()))),
-            shared_by: CachePadded::new(Arc::new(AtomicU16::new(1))),
+            total: Arc::new(AtomicU64::new(limit.get())),
+            shared_by: Arc::new(AtomicU16::new(1)),
         }
     }
 
@@ -49,8 +49,8 @@ impl RateLimit {
     #[must_use]
     pub fn new_disabled() -> Self {
         Self {
-            total: CachePadded::new(Arc::new(AtomicU64::new(Self::DISABLED))),
-            shared_by: CachePadded::new(Arc::new(AtomicU16::new(1))),
+            total: Arc::new(AtomicU64::new(Self::DISABLED)),
+            shared_by: Arc::new(AtomicU16::new(1)),
         }
     }
 
@@ -62,10 +62,10 @@ impl RateLimit {
     #[must_use]
     pub fn new_shared_by<const N: u16>(limit: NonZeroU64) -> Self {
         Self {
-            total: CachePadded::new(Arc::new(AtomicU64::new(limit.get()))),
-            shared_by: CachePadded::new(Arc::new(AtomicU16::new(
+            total: Arc::new(AtomicU64::new(limit.get())),
+            shared_by: Arc::new(AtomicU16::new(
                 NonZeroU16::new(N).expect("`shared_by cannot be 0`").get(),
-            ))),
+            )),
         }
     }
 
@@ -168,7 +168,7 @@ impl RateLimit {
 
 pub(crate) struct RateLimiter<const ENABLED: bool> {
     /// Bytes transfer rate limitation, `B/s`.
-    limit: RateLimit,
+    limit: CachePadded<RateLimit>,
 
     /// Available tokens (in Bytes).
     tokens: Option<f64>,
@@ -229,7 +229,7 @@ impl<const ENABLED: bool> RateLimiter<ENABLED> {
     /// Create a new rate limiter with the specified [`RateLimit`].
     pub(crate) const fn new(limit: RateLimit) -> Self {
         Self {
-            limit,
+            limit: CachePadded::new(limit),
             tokens: None,
             last_updated: None,
         }
