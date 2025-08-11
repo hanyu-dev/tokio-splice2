@@ -41,7 +41,7 @@ pub const DEFAULT_PIPE_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked
 
 #[derive(Debug)]
 /// Linux Pipe.
-pub(crate) struct Pipe {
+pub struct Pipe {
     /// File descriptor for reading from the pipe
     read_side_fd: Fd,
 
@@ -117,7 +117,12 @@ impl Pipe {
     /// Create a pipe, with flags `O_NONBLOCK` and `O_CLOEXEC`.
     ///
     /// The default pipe size is set to `MAXIMUM_PIPE_SIZE` bytes.
-    pub(crate) fn new() -> io::Result<Self> {
+    ///
+    /// ## Errors
+    ///
+    /// * If the pipe creation of setting pipe size fails, an `io::Error` is
+    ///   returned.
+    pub fn new() -> io::Result<Self> {
         pipe_with(PipeFlags::NONBLOCK | PipeFlags::CLOEXEC)
             .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
             .and_then(|(read_fd, write_fd)| {
@@ -147,10 +152,12 @@ impl Pipe {
 
     /// Set the pipe size.
     ///
-    /// For more details, see [`fcntl(2)`].
+    /// ## Errors
+    ///
+    /// See [`fcntl(2)`].
     ///
     /// [`fcntl(2)`]: https://man7.org/linux/man-pages/man2/fcntl.2.html.
-    pub(crate) fn set_pipe_size(&mut self, pipe_size: usize) -> io::Result<usize> {
+    pub fn set_pipe_size(&mut self, pipe_size: usize) -> io::Result<usize> {
         let Some(write_side_fd) = self.write_side_fd.as_fd() else {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -173,7 +180,7 @@ impl Pipe {
         matches!(self.write_side_fd, Fd::Reserved(_) | Fd::Closed)
     }
 
-    #[inline(always)]
+    #[inline]
     /// Close the pipe write side file descriptor.
     pub(crate) fn set_splice_drain_finished(&mut self) {
         self.write_side_fd.set_reserved();
@@ -196,9 +203,10 @@ impl Pipe {
         self.read_side_fd.set_reserved();
     }
 
+    #[must_use]
     #[inline]
     /// Returns the size of the pipe, in bytes.
-    pub(crate) const fn size(&self) -> NonZeroUsize {
+    pub const fn size(&self) -> NonZeroUsize {
         self.size
     }
 }

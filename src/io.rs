@@ -58,6 +58,7 @@ impl<R, W, const RATE_LIMITER_IS_ENABLED: bool> ops::Deref
 }
 
 impl<R, W> SpliceIo<R, W, RATE_LIMITER_DISABLED> {
+    #[must_use]
     /// Create a new `SpliceIo` instance with ctx and pinned `R` / `W`.
     pub fn new(ctx: SpliceIoCtx<R, W>) -> Self {
         SpliceIo {
@@ -154,6 +155,7 @@ where
         ),
         tracing::instrument(level = "TRACE", skip(self, cx, r, w), ret)
     )]
+    #[allow(clippy::too_many_lines)]
     /// Performs zero-copy data transfer from reader `R` to writer `W` using the
     /// splice syscall.
     ///
@@ -211,6 +213,7 @@ where
                         Drained::Some(_drained) => {
                             #[cfg(feature = "feat-rate-limit")]
                             {
+                                #[allow(clippy::used_underscore_binding)]
                                 match this.rate_limiter.check(_drained) {
                                     RateLimitResult::Accepted => {}
                                     RateLimitResult::Throttled { now, dur } => {

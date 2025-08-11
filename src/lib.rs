@@ -82,6 +82,10 @@ pub use rate::RateLimit;
 ///
 /// See [`SpliceIoCtx::prepare`] and [`SpliceIo::execute`] for more details; see
 /// the [crate-level documentation](crate) for known limitations.
+///
+/// ## Errors
+///
+/// * Create pipe failed.
 pub async fn copy<R, W>(r: &mut R, w: &mut W) -> std::io::Result<traffic::TrafficResult>
 where
     R: io::AsyncReadFd + IsNotFile + Unpin,
@@ -98,6 +102,11 @@ where
 ///
 /// See [`SpliceIoCtx::prepare_reading_file`] for more details; see the
 /// [crate-level documentation](crate) for known limitations.
+///
+/// ## Errors
+///
+/// * Create pipe failed.
+/// * Invalid file length or offset.
 pub async fn sendfile<R, W>(
     r: &mut R,
     w: &mut W,
@@ -126,6 +135,10 @@ where
 ///
 /// See [`SpliceIoCtx::prepare`] and [`SpliceBidiIo::execute`] for more details;
 /// see the [crate-level documentation](crate) for known limitations.
+///
+/// ## Errors
+///
+/// * Create pipe failed.
 pub async fn copy_bidirectional<A, B>(
     sl: &mut A,
     sr: &mut B,

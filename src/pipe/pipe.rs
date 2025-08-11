@@ -1,6 +1,6 @@
 //! Pipe pool to reuse pipes.
 
-use core::{mem, sync::atomic::AtomicUsize};
+use std::{mem, sync::atomic::AtomicUsize};
 use std::collections::VecDeque;
 use std::io;
 

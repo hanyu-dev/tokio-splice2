@@ -1,4 +1,6 @@
-//! Uni-test: Splice from file
+//! Test: splice from file
+
+#![allow(clippy::cast_possible_truncation)]
 
 use std::io;
 
@@ -44,7 +46,7 @@ async fn test_file(file_name: &str) -> io::Result<async_fs::File> {
         .create(true)
         .truncate(true)
         .append(false)
-        .open(&format!("/tmp/{}.txt", file_name))
+        .open(&format!("/tmp/{file_name}.txt"))
         .await?;
 
     file.write_all(&FILE_CONTENT).await?;
@@ -69,7 +71,7 @@ async fn splice_from_file(
     Ok(())
 }
 
-/// Test configuration for splice_from_file tests
+/// Test configuration for `splice_from_file` tests
 struct SpliceFromFileTestConfig {
     f_offset_start: Option<u64>,
     f_offset_end: Option<u64>,
@@ -100,7 +102,7 @@ impl SpliceFromFileTestConfig {
     }
 }
 
-/// Common test runner for splice_from_file tests
+/// Common test runner for `splice_from_file` tests
 async fn run_splice_from_file_test(config: SpliceFromFileTestConfig) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let listen_at = listener.local_addr()?;

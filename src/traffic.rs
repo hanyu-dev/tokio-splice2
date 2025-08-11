@@ -17,6 +17,7 @@ pub struct TrafficResult {
 }
 
 impl TrafficResult {
+    #[must_use]
     #[inline]
     /// Merges two `TrafficResult` instances.
     pub fn merge(self, other: Self) -> Self {
@@ -27,6 +28,7 @@ impl TrafficResult {
         }
     }
 
+    #[must_use]
     #[inline]
     /// Returns the total number of bytes transmitted in both directions.
     pub const fn sum(&self) -> usize {
@@ -35,6 +37,10 @@ impl TrafficResult {
 
     #[inline]
     /// Turns the `TrafficResult` into an `io::Result<usize>`.
+    ///
+    /// ## Errors
+    ///
+    /// Extracts the error from the `TrafficResult` if it exists.
     pub fn into_result(self) -> io::Result<Self> {
         if let Some(err) = self.error {
             Err(err)

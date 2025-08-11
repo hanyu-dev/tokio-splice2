@@ -81,6 +81,7 @@ impl<R, W> SpliceIoCtx<R, W> {
         Self::_prepare()
     }
 
+    #[must_use]
     #[inline]
     /// Set the target length of bytes to be copy from `R` to `W`.
     ///
@@ -173,6 +174,14 @@ impl<R, W> SpliceIoCtx<R, W> {
     /// Set the pipe size.
     ///
     /// See [`Pipe`]'s top level docs for more details.
+    ///
+    /// ## Errors
+    ///
+    /// * Set pipe size failed.
+    ///
+    /// For more details, see [`fcntl(2)`].
+    ///
+    /// [`fcntl(2)`]: https://man7.org/linux/man-pages/man2/fcntl.2.html.
     pub fn set_pipe_size(mut self, pipe_size: usize) -> io::Result<Self> {
         self.pipe.set_pipe_size(pipe_size)?;
         Ok(self)
@@ -180,18 +189,21 @@ impl<R, W> SpliceIoCtx<R, W> {
 }
 
 impl<R, W> SpliceIoCtx<R, W> {
+    #[must_use]
     #[inline]
     /// Returns bytes that have been read from `R`.
     pub const fn has_read(&self) -> usize {
         self.has_read
     }
 
+    #[must_use]
     #[inline]
     /// Returns bytes that have been written to `W`.
     pub const fn has_written(&self) -> usize {
         self.has_written
     }
 
+    #[must_use]
     #[inline]
     /// Returns the pipe size.
     pub const fn pipe_size(&self) -> NonZeroUsize {
@@ -216,6 +228,7 @@ impl<R, W> SpliceIoCtx<R, W> {
         self.pipe.splice_drain_finished() && self.pipe.splice_pump_finished()
     }
 
+    #[must_use]
     #[inline]
     /// Returns the traffic result (client TX one).
     pub const fn traffic_client_tx(&self, error: Option<io::Error>) -> TrafficResult {
@@ -226,6 +239,7 @@ impl<R, W> SpliceIoCtx<R, W> {
         }
     }
 
+    #[must_use]
     #[inline]
     /// Returns the traffic result (client RX one).
     pub const fn traffic_client_rx(&self, error: Option<io::Error>) -> TrafficResult {
@@ -236,6 +250,7 @@ impl<R, W> SpliceIoCtx<R, W> {
         }
     }
 
+    #[must_use]
     #[inline]
     /// Builder pattern version of [`SpliceIo::new`].
     pub fn into_io(self) -> SpliceIo<R, W> {

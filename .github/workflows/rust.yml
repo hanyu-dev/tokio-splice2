@@ -10,6 +10,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  pre_ci:
+    uses: dtolnay/.github/.github/workflows/pre_ci.yml@master
+
   build:
     name: Build - ${{ matrix.platform.target }}
     runs-on: ubuntu-24.04
@@ -42,7 +45,7 @@ jobs:
           args: "--release --verbose --features feat-rate-limit"
 
   test:
-    name: Test
+    name: Test 1.70.0
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -52,3 +55,27 @@ jobs:
           toolchain: 1.70.0
       - name: Run tests
         run: cargo test --release --verbose --features feat-rate-limit
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@clippy
+      - run: cargo clippy --tests --benches --all-features -- -Dclippy::all -Dclippy::pedantic
+
+  doc:
+    name: Documentation
+    needs: pre_ci
+    if: needs.pre_ci.outputs.continue
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/install@cargo-docs-rs
+      - run: cargo docs-rs

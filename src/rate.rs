@@ -1,5 +1,9 @@
 //! Token bucket rate limiter for bytes transfer rate limitation.
 
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_truncation)]
+
 use std::cmp::min;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -33,6 +37,7 @@ impl RateLimit {
     const DISABLED: u64 = 0;
 
     /// Create a new [`RateLimit`].
+    #[must_use]
     pub fn new(limit: NonZeroU64) -> Self {
         Self {
             total: CachePadded::new(Arc::new(AtomicU64::new(limit.get()))),
@@ -41,6 +46,7 @@ impl RateLimit {
     }
 
     /// Create a new [`RateLimit`] that is disabled (total = 0).
+    #[must_use]
     pub fn new_disabled() -> Self {
         Self {
             total: CachePadded::new(Arc::new(AtomicU64::new(Self::DISABLED))),
@@ -53,6 +59,7 @@ impl RateLimit {
     /// # Panics
     ///
     /// If `N` is 0.
+    #[must_use]
     pub fn new_shared_by<const N: u16>(limit: NonZeroU64) -> Self {
         Self {
             total: CachePadded::new(Arc::new(AtomicU64::new(limit.get()))),
@@ -63,6 +70,7 @@ impl RateLimit {
     }
 
     /// Get the current limit for single connection.
+    #[must_use]
     pub fn current(&self) -> Option<NonZeroU64> {
         let total = self.total.load(Ordering::Relaxed);
 
@@ -71,7 +79,7 @@ impl RateLimit {
         } else {
             let shared_by = self.shared_by.load(Ordering::Relaxed);
 
-            NonZeroU64::new((total + shared_by as u64) / shared_by as u64)
+            NonZeroU64::new((total + u64::from(shared_by)) / u64::from(shared_by))
         }
     }
 
@@ -112,9 +120,13 @@ impl RateLimit {
 
     /// Decrease the number of shared instances by `N`.
     ///
-    /// # Panics
+    /// ## Panics
     ///
     /// If `N` is 0.
+    ///
+    /// ## Errors
+    ///
+    /// See [`dec_shared_by`](Self::dec_shared_by).
     pub fn dec_shared_by_n<const N: u16>(&self) -> io::Result<()> {
         self.dec_shared_by({
             NonZeroU16::new(N).expect("`dec_shared_by_n` cannot be called with 0")
@@ -122,7 +134,12 @@ impl RateLimit {
     }
 
     /// Decrease the number of shared instances.
+    ///
+    /// ## Errors
+    ///
+    /// Cannot decrease `shared_by` to 0.
     pub fn dec_shared_by(&self, dec: NonZeroU16) -> io::Result<()> {
+        #[allow(clippy::redundant_closure_for_method_calls)]
         self.shared_by
             .fetch_update(Ordering::Release, Ordering::Acquire, |shared_by| {
                 shared_by
@@ -141,6 +158,7 @@ impl RateLimit {
 
     /// Clone the `RateLimit` with the same total limit, and increase the shared
     /// instances count by 1.
+    #[must_use]
     pub fn clone_shared(&self) -> Self {
         let new_limit = self.clone();
         new_limit.inc_shared_by_n::<1>();
@@ -274,13 +292,12 @@ impl<const ENABLED: bool> RateLimiter<ENABLED> {
             return RateLimitResult::Accepted;
         };
 
-        let current_tokens = match self.tokens {
-            Some(ref mut tokens) => tokens,
-            None => {
-                // Initialize the tokens and last updated time.
-                self.tokens = Some(limit.get() as f64 * TOKIO_TIMER_MIN_DUR.as_secs_f64());
-                self.tokens.as_mut().unwrap()
-            }
+        let current_tokens = if let Some(ref mut tokens) = self.tokens {
+            tokens
+        } else {
+            // Initialize the tokens and last updated time.
+            self.tokens = Some(limit.get() as f64 * TOKIO_TIMER_MIN_DUR.as_secs_f64());
+            self.tokens.as_mut().unwrap()
         };
 
         // Refill the tokens bucket
@@ -300,8 +317,6 @@ impl<const ENABLED: bool> RateLimiter<ENABLED> {
                     )
                     .max(TOKIO_TIMER_MIN_DUR), // or Tokio may sleep forever
                 };
-            } else {
-                //
             }
         }
 

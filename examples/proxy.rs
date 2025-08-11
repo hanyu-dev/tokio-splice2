@@ -1,11 +1,8 @@
 //! Example: simple L4 proxy
 
-use std::num::NonZeroU64;
 use std::{env, io};
 
 use tokio::net::{TcpListener, TcpStream};
-#[cfg(feature = "feat-rate-limit")]
-use tokio_splice2::rate::RateLimit;
 
 // #[tokio::main(flavor = "current_thread")]
 #[tokio::main]
@@ -91,19 +88,14 @@ async fn forwarding(mut stream1: TcpStream) -> io::Result<()> {
     // let result = tokio_splice::zero_copy_bidirectional(&mut stream1, &mut
     // stream2).await;
 
-    let limit = env::var("LIMIT")
-        .ok()
-        .and_then(|r| r.parse().ok())
-        .unwrap_or(1u64 * 1000 * 1000);
+    // let limit = env::var("LIMIT")
+    //     .ok()
+    //     .and_then(|r| r.parse().ok())
+    //     .unwrap_or(1u64 * 1000 * 1000);
 
-    println!(
-        "Rate limit is set to {}/s",
-        human_format_next::Formatter::SI
-            .with_custom_unit("B")
-            .format(limit),
-    );
+    // println!("Rate limit is set to {limit} B/s");
 
-    let limit = RateLimit::new(NonZeroU64::new(limit).unwrap());
+    // let limit = RateLimit::new(NonZeroU64::new(limit).unwrap());
 
     // let rate_limiter_clone = rate_limiter.clone();
     // tokio::spawn(async move {
@@ -141,12 +133,8 @@ async fn forwarding(mut stream1: TcpStream) -> io::Result<()> {
     //     }
     // });
 
-    let io_sl2sr = tokio_splice2::context::SpliceIoCtx::prepare()?
-        .into_io()
-        .with_rate_limit(limit.clone());
-    let io_sr2sl = tokio_splice2::context::SpliceIoCtx::prepare()?
-        .into_io()
-        .with_rate_limit(limit);
+    let io_sl2sr = tokio_splice2::context::SpliceIoCtx::prepare()?.into_io();
+    let io_sr2sl = tokio_splice2::context::SpliceIoCtx::prepare()?.into_io();
 
     let traffic = tokio_splice2::io::SpliceBidiIo { io_sl2sr, io_sr2sl }
         .execute(&mut stream1, &mut stream2)
@@ -157,17 +145,9 @@ async fn forwarding(mut stream1: TcpStream) -> io::Result<()> {
     // let total = traffic.0 + traffic.1;
     let cost = instant.elapsed();
     println!(
-        "Forwarded traffic: total: {}, time: {:.2}s, avg: {:.4} -> {}, error: {:?}",
-        human_format_next::Formatter::SI
-            .with_custom_unit("B")
-            .with_decimals::<4>()
-            .format(total as f64),
+        "Forwarded traffic: total: {total} B, time: {:.2} s, avg: {:.4} B/s, error: {:?}",
         cost.as_secs_f64(),
         total as f64 / cost.as_secs_f64(),
-        human_format_next::Formatter::SI
-            .with_custom_unit("B/s")
-            .with_decimals::<4>()
-            .format((total as f64 / cost.as_secs_f64()) as u64),
         traffic.error
     );
 
