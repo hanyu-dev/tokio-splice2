@@ -1,6 +1,6 @@
 [package]
 name = "tokio-splice2"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.70.0"
 
@@ -45,6 +45,9 @@ feat-tracing-trace = ["feat-tracing"]
 
 # Enable rate limiting support
 feat-rate-limit = ["tokio/time"]
+
+# Perform brutal shutdown instead of graceful shutdown.
+feat-brutal-shutdown = []
 
 # Enable nightly Rust feature
 feat-nightly = []

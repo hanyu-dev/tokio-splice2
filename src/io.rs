@@ -387,10 +387,23 @@ where
             .as_mut()
             .poll_execute(cx, sr.as_mut(), sl.as_mut());
 
-        match (io_sl2sr_ret, io_sr2sl_ret) {
-            (Poll::Pending, _) | (_, Poll::Pending) => Poll::Pending,
-            (Poll::Ready(Ok(())), Poll::Ready(Ok(()))) => Poll::Ready(Ok(())),
-            (Poll::Ready(Err(e)), _) | (_, Poll::Ready(Err(e))) => Poll::Ready(Err(e)),
+        #[cfg(not(feature = "feat-brutal-shutdown"))]
+        {
+            match (io_sl2sr_ret, io_sr2sl_ret) {
+                (Poll::Pending, _) | (_, Poll::Pending) => Poll::Pending,
+                (Poll::Ready(Ok(())), Poll::Ready(Ok(()))) => Poll::Ready(Ok(())),
+                (Poll::Ready(Err(e)), _) | (_, Poll::Ready(Err(e))) => Poll::Ready(Err(e)),
+            }
+        }
+
+        #[cfg(feature = "feat-brutal-shutdown")]
+        {
+            match (io_sl2sr_ret, io_sr2sl_ret) {
+                (Poll::Pending, Poll::Pending) => Poll::Pending,
+                (Poll::Ready(Err(e)), _) | (_, Poll::Ready(Err(e))) => Poll::Ready(Err(e)),
+                // Once received `FIN`, close the other side immediately.
+                (Poll::Ready(Ok(())), _) | (_, Poll::Ready(Ok(()))) => Poll::Ready(Ok(())),
+            }
         }
     }
 }
