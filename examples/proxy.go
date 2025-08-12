@@ -100,7 +100,7 @@ func forwarding(stream1 net.Conn) error {
 
 	elapsed := time.Since(startTime)
 
-	fmt.Printf("Forwarded traffic: %+v, avg: %.4f GB/s\n", result, float64((result.BytesForward+result.BytesReverse)/1000/1000/1000)/elapsed.Seconds())
+	fmt.Printf("Forwarded traffic: %+v, avg: %.4f B/s\n", result, float64((result.BytesForward+result.BytesReverse))/elapsed.Seconds())
 
 	if err != nil {
 		log.Printf("Failed to copy data: %v", err)

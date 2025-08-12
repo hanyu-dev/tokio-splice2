@@ -429,10 +429,12 @@ pub trait AsyncReadFd: AsyncRead + AsFd {
 }
 
 impl<T: AsyncReadFd + Unpin> AsyncReadFd for &mut T {
+    #[inline]
     fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         (**self).poll_read_ready(cx)
     }
 
+    #[inline]
     fn try_io_read<R>(&self, f: impl FnOnce() -> io::Result<R>) -> io::Result<R> {
         (**self).try_io_read(f)
     }
@@ -451,10 +453,12 @@ pub trait AsyncWriteFd: AsyncWrite + AsFd {
 }
 
 impl<T: AsyncWriteFd + Unpin> AsyncWriteFd for &mut T {
+    #[inline]
     fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         (**self).poll_write_ready(cx)
     }
 
+    #[inline]
     fn try_io_write<R>(&self, f: impl FnOnce() -> io::Result<R>) -> io::Result<R> {
         (**self).try_io_write(f)
     }
@@ -464,20 +468,24 @@ macro_rules! impl_async_fd {
     ($($ty:ty),+) => {
         $(
             impl AsyncReadFd for $ty {
+                #[inline]
                 fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
                     self.poll_read_ready(cx)
                 }
 
+                #[inline]
                 fn try_io_read<R>(&self, f: impl FnOnce() -> io::Result<R>) -> io::Result<R> {
                     self.try_io(Interest::READABLE, f)
                 }
             }
 
             impl AsyncWriteFd for $ty {
+                #[inline]
                 fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
                     self.poll_write_ready(cx)
                 }
 
+                #[inline]
                 fn try_io_write<R>(&self, f: impl FnOnce() -> io::Result<R>) -> io::Result<R> {
                     self.try_io(Interest::WRITABLE, f)
                 }
@@ -489,20 +497,24 @@ macro_rules! impl_async_fd {
     (FILE: $($ty:ty),+) => {
         $(
             impl AsyncReadFd for $ty {
+                #[inline]
                 fn poll_read_ready(&self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
                     Poll::Ready(Ok(()))
                 }
 
+                #[inline]
                 fn try_io_read<R>(&self, f: impl FnOnce() -> io::Result<R>) -> io::Result<R> {
                     f()
                 }
             }
 
             impl AsyncWriteFd for $ty {
+                #[inline]
                 fn poll_write_ready(&self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
                     Poll::Ready(Ok(()))
                 }
 
+                #[inline]
                 fn try_io_write<R>(&self, f: impl FnOnce() -> io::Result<R>) -> io::Result<R> {
                     f()
                 }
